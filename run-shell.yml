@@ -2,10 +2,10 @@
 - hosts: all
   gather_facts: true
   tasks:
-    - name: Run the specified shell command
-      shell: "hostname; date"
-      register: result
-
-    - name: Display the outcome
+    - name: Retrieve hostname using Ansible facts
       debug:
-        msg: "{{ result.stdout }}"
+        msg: "Hostname: {{ ansible_hostname }}"
+
+    - name: Retrieve current date and time using Ansible facts
+      debug:
+        msg: "Date and Time: {{ ansible_date_time.date }} {{ ansible_date_time.time }}"
