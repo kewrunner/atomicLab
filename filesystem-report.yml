@@ -10,43 +10,32 @@
 
   tasks:
     - name: Collect filesystem usage (df -h)
-      ansible.builtin.command: df -h
+      ansible.builtin.command:
+        argv: [df, -h]
       register: df_out
       changed_when: false
 
-    # Try modern util-linux first (has FSUSE% and MOUNTPOINTS)
+    # Try modern util-linux first (FSUSE% + MOUNTPOINTS)
     - name: Try lsblk with modern columns
       ansible.builtin.command:
-        argv:
-          - lsblk
-          - -f
-          - -o
-          - NAME,FSTYPE,SIZE,FSUSE%,MOUNTPOINTS,UUID
+        argv: [lsblk, -f, -o, NAME,FSTYPE,SIZE,FSUSE%,MOUNTPOINTS,UUID]
       register: lsblk_try1
       changed_when: false
       failed_when: false
 
-    # Fallback for older util-linux (no FSUSE%, singular MOUNTPOINT)
-    - name: Try lsblk with older columns (no FSUSE%)
+    # Fallback: older lsblk (no FSUSE%, singular MOUNTPOINT)
+    - name: Try lsblk with older columns
       ansible.builtin.command:
-        argv:
-          - lsblk
-          - -f
-          - -o
-          - NAME,FSTYPE,SIZE,MOUNTPOINT,UUID
+        argv: [lsblk, -f, -o, NAME,FSTYPE,SIZE,MOUNTPOINT,UUID]
       register: lsblk_try2
       changed_when: false
       failed_when: false
       when: lsblk_try1.rc != 0
 
-    # Minimal fallback (very old lsblk)
+    # Minimal fallback: very old lsblk
     - name: Try lsblk minimal columns
       ansible.builtin.command:
-        argv:
-          - lsblk
-          - -f
-          - -o
-          - NAME,FSTYPE,SIZE
+        argv: [lsblk, -f, -o, NAME,FSTYPE,SIZE]
       register: lsblk_try3
       changed_when: false
       failed_when: false
@@ -72,31 +61,22 @@
         paths: "{{ home_path }}"
         file_type: file
         recurse: yes
+        follow: false
+        hidden: false
+        # optional filters to skip obvious big caches; tweak as needed
         excludes:
           - "*.tmp"
           - "*.swp"
-        follow: false
-        hidden: false
-        age: 0
+          - "*.cache/*"
+          - ".minikube/*"
+          - "node_modules/*"
       register: found_home
 
     - name: Compute top {{ top_n }} largest files
       ansible.builtin.set_fact:
         largest_files: >-
-          {{ (found_home.files | sort(attribute='size', reverse=True))[:top_n] if (found_home is defined and found_home.files is defined) else [] }}
-
-    - name: Render largest file lines (size bytes \t path)
-      ansible.builtin.set_fact:
-        largest_lines: >-
-          {{ largest_files | map('extract', {'size':'size','path':'path'}) |
-             map('regex_replace','^','') |
-             list |
-             map('json_query','join(`\t`, [`size`,`path`])') | list
-             if largest_files | length > 0 else [] }}
-      vars:
-        # json_query trick requires strings; cast size to string inline in the copy step
-        # We'll format lines directly when writing the report.
-        dummy: ""
+          {{ (found_home.files | sort(attribute='size', reverse=True))[:top_n]
+             if (found_home is defined and found_home.files is defined) else [] }}
 
     - name: Write consolidated report to /tmp
       ansible.builtin.copy:
