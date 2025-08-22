@@ -11,7 +11,7 @@
   tasks:
     - name: Collect filesystem usage (df -hT) excluding tmpfs/devtmpfs/etc.
       ansible.builtin.shell: |
-        df -hT | awk 'NR==1 || $2 !~ /^(tmpfs|devtmpfs|squashfs|overlay)$/'
+        df -h 
       args:
         executable: /bin/bash
       register: df_out
@@ -27,28 +27,28 @@
         path: "{{ home_path }}"
       register: st_home
 
-    - name: Write consolidated report to /tmp
-      ansible.builtin.copy:
-        dest: "/tmp/fs_report_{{ inventory_hostname }}.txt"
-        mode: "0644"
-        content: |
-          Host: {{ inventory_hostname }}
-          Date: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+    # - name: Write consolidated report to /tmp
+    #   ansible.builtin.copy:
+    #     dest: "/tmp/fs_report_{{ inventory_hostname }}.txt"
+    #     mode: "0644"
+    #     content: |
+    #       Host: {{ inventory_hostname }}
+    #       Date: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
 
-          === Filesystems (df -hT, filtered) ===
-          {{ df_out.stdout }}
+    #       === Filesystems (df -hT, filtered) ===
+    #       {{ df_out.stdout }}
 
-          === Block Devices (lsblk -f) ===
-          {{ lsblk_out.stdout }}
+    #       === Block Devices (lsblk -f) ===
+    #       {{ lsblk_out.stdout }}
 
-          === Largest {{ top_n }} files under {{ home_path }} (bytes \t path) ===
-          {{ largest_out.stdout }}
+    #       === Largest {{ top_n }} files under {{ home_path }} (bytes \t path) ===
+    #       {{ largest_out.stdout }}
 
-    - name: Show where the report was saved
-      ansible.builtin.debug:
-        msg:
-          - "Report saved to /tmp/fs_report_{{ inventory_hostname }}.txt"
-          - "Top {{ top_n }} largest files under {{ home_path }} gathered."
+    # - name: Show where the report was saved
+    #   ansible.builtin.debug:
+    #     msg:
+    #       - "Report saved to /tmp/fs_report_{{ inventory_hostname }}.txt"
+    #       - "Top {{ top_n }} largest files under {{ home_path }} gathered."
 
     # OPTIONAL: fetch the report back to the control node
     # - name: Fetch report to control node
