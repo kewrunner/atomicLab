@@ -7,15 +7,13 @@
   vars:
     home_path: /home
     top_n: 20
-    # Filesystem types to exclude from df output
-    exclude_fs_types: [tmpfs, devtmpfs, squashfs, overlay]
 
   tasks:
-    - name: Collect filesystem usage (df -h) excluding tmpfs/devtmpfs/etc.
+    - name: Collect filesystem usage (df -hT) excluding tmpfs/devtmpfs/etc.
       ansible.builtin.shell: |
-        df -h
+        df -hT | awk 'NR==1 || $2 !~ /^(tmpfs|devtmpfs|squashfs|overlay)$/'
       args:
-        warn: false
+        executable: /bin/bash
       register: df_out
       changed_when: false
 
@@ -23,6 +21,11 @@
       ansible.builtin.command: lsblk -f -o NAME,FSTYPE,SIZE,FSUSE%,MOUNTPOINT,UUID
       register: lsblk_out
       changed_when: false
+
+    - name: Check if {{ home_path }} exists
+      ansible.builtin.stat:
+        path: "{{ home_path }}"
+      register: st_home
 
     - name: Find largest files under {{ home_path }} (stay on same filesystem)
       ansible.builtin.shell: |
@@ -34,6 +37,13 @@
         executable: /bin/bash
       register: largest_out
       changed_when: false
+      when: st_home.stat.exists and st_home.stat.isdir
+
+    - name: Fallback when {{ home_path }} is missing
+      ansible.builtin.set_fact:
+        largest_out:
+          stdout: "Path {{ home_path }} does not exist; skipped."
+      when: not (st_home.stat.exists and st_home.stat.isdir)
 
     - name: Write consolidated report to /tmp
       ansible.builtin.copy:
@@ -57,3 +67,10 @@
         msg:
           - "Report saved to /tmp/fs_report_{{ inventory_hostname }}.txt"
           - "Top {{ top_n }} largest files under {{ home_path }} gathered."
+
+    # OPTIONAL: fetch the report back to the control node
+    # - name: Fetch report to control node
+    #   ansible.builtin.fetch:
+    #     src: "/tmp/fs_report_{{ inventory_hostname }}.txt"
+    #     dest: "./fs_reports/"
+    #     flat: yes
