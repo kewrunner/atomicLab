@@ -48,7 +48,7 @@
         mode: "0640"
 
     - name: Create tar.gz archive in /tmp
-      ansible.builtin.archive:
+      community.general.archive:
         path: "{{ tmp_dir }}/{{ su_log_found | basename }}"
         dest: "{{ tmp_dir }}/{{ su_log_found | basename }}.tar.gz"
         format: gz
