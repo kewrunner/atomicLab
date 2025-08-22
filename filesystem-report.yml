@@ -1,0 +1,59 @@
+---
+- name: Filesystem report and largest files under /home
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    home_path: /home
+    top_n: 20
+    # Filesystem types to exclude from df output
+    exclude_fs_types: [tmpfs, devtmpfs, squashfs, overlay]
+
+  tasks:
+    - name: Collect filesystem usage (df -hT) excluding tmpfs/devtmpfs/etc.
+      ansible.builtin.shell: |
+        df -hT | awk 'NR==1 || $2 !~ /^(tmpfs|devtmpfs|squashfs|overlay)$/'
+      args:
+        warn: false
+      register: df_out
+      changed_when: false
+
+    - name: Collect block devices info (lsblk -f)
+      ansible.builtin.command: lsblk -f -o NAME,FSTYPE,SIZE,FSUSE%,MOUNTPOINT,UUID
+      register: lsblk_out
+      changed_when: false
+
+    - name: Find largest files under {{ home_path }} (stay on same filesystem)
+      ansible.builtin.shell: |
+        set -o pipefail
+        find {{ home_path }} -xdev -type f -printf '%s\t%p\n' 2>/dev/null \
+        | sort -nr \
+        | head -n {{ top_n }}
+      args:
+        executable: /bin/bash
+      register: largest_out
+      changed_when: false
+
+    - name: Write consolidated report to /tmp
+      ansible.builtin.copy:
+        dest: "/tmp/fs_report_{{ inventory_hostname }}.txt"
+        mode: "0644"
+        content: |
+          Host: {{ inventory_hostname }}
+          Date: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+
+          === Filesystems (df -hT, filtered) ===
+          {{ df_out.stdout }}
+
+          === Block Devices (lsblk -f) ===
+          {{ lsblk_out.stdout }}
+
+          === Largest {{ top_n }} files under {{ home_path }} (bytes \t path) ===
+          {{ largest_out.stdout }}
+
+    - name: Show where the report was saved
+      ansible.builtin.debug:
+        msg:
+          - "Report saved to /tmp/fs_report_{{ inventory_hostname }}.txt"
+          - "Top {{ top_n }} largest files under {{ home_path }} gathered."
