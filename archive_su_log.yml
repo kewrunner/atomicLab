@@ -1,59 +1,67 @@
 ---
-- name: Copy su log to /tmp and compress
+- name: Copy su log to /tmp and compress to .tar.gz (cross-distro)
   hosts: all
-  gather_facts: false
+  gather_facts: true
 
   vars:
-    candidate_logs:
-      - /var/log/sulog       # Some distros
-      - /var/log/secure      # RHEL/CentOS contains su entries
-      - /var/log/auth.log    # Debian/Ubuntu contains su entries
     tmp_dir: /tmp
 
   tasks:
-    - name: Find first existing su-related log
+    - name: Determine distro flags
       ansible.builtin.set_fact:
-        su_log_found: "{{ item }}"
-      loop: "{{ candidate_logs }}"
-      when: (lookup('ansible.builtin.fileglob', item) is not none) and
-            (lookup('ansible.builtin.fileglob', item) | length > 0)
-      register: _candidate_check
-      until: su_log_found is defined
-      retries: "{{ candidate_logs | length }}"
-      delay: 0
+        is_ubuntu: "{{ (ansible_facts.distribution | lower) == 'ubuntu' }}"
 
-    - name: If not found, probe each candidate with stat (fallback)
-      when: su_log_found is not defined
-      block:
-        - name: Stat candidate logs
-          ansible.builtin.stat:
-            path: "{{ item }}"
-          loop: "{{ candidate_logs }}"
-          register: log_stats
+    - name: Build candidate su log list (ordered by preference)
+      ansible.builtin.set_fact:
+        su_candidates: >-
+          {{ (is_ubuntu | ternary(
+                ['/var/log/sulog', '/var/log/auth.log', '/var/log/secure'],
+                ['/var/log/sulog', '/var/log/secure', '/var/log/auth.log']
+              )) }}
 
-        - name: Choose first existing path
-          ansible.builtin.set_fact:
-            su_log_found: "{{ (log_stats.results | selectattr('stat.exists') | list | first).stat.path | default(omit) }}"
+    - name: Stat candidate su logs
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ su_candidates }}"
+      register: su_stats
+
+    - name: Choose first existing su log
+      ansible.builtin.set_fact:
+        su_log_found: >-
+          {{ (su_stats.results
+              | selectattr('stat.exists')
+              | map(attribute='stat.path')
+              | list
+              | first) | default(omit) }}
 
     - name: Fail if no su log located
       ansible.builtin.fail:
-        msg: "No su log file found in {{ candidate_logs }}"
+        msg: "No su-related log found. Checked: {{ su_candidates | join(', ') }}"
       when: su_log_found is not defined
+
+    - name: Compute destination paths and archive name
+      ansible.builtin.set_fact:
+        su_basename: "{{ su_log_found | basename }}"
+        su_copy_path: "{{ tmp_dir }}/{{ su_log_found | basename }}"
+        su_archive_path: "{{ tmp_dir }}/{{ (su_log_found | basename) }}.tar.gz"
 
     - name: Copy su log into /tmp
       ansible.builtin.copy:
         src: "{{ su_log_found }}"
-        dest: "{{ tmp_dir }}/{{ su_log_found | basename }}"
+        dest: "{{ su_copy_path }}"
         remote_src: true
         mode: '0640'
 
     - name: Create tar.gz archive in /tmp
       ansible.builtin.archive:
-        path: "{{ tmp_dir }}/{{ su_log_found | basename }}"
-        dest: "{{ tmp_dir }}/{{ su_log_found | basename }}.tar.gz"
+        path: "{{ su_copy_path }}"
+        dest: "{{ su_archive_path }}"
         format: gz
         remove: false
 
-    - name: Report archive path
+    - name: Report results
       ansible.builtin.debug:
-        msg: "Archive created: {{ tmp_dir }}/{{ su_log_found | basename }}.tar.gz"
+        msg:
+          picked_log: "{{ su_log_found }}"
+          copied_to: "{{ su_copy_path }}"
+          archive: "{{ su_archive_path }}"
