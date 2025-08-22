@@ -1,5 +1,5 @@
 ---
-- name: Copy su log to /tmp and compress (Ubuntu 22/24 & RHEL/CentOS)
+- name: Copy su/auth log to /tmp and compress to .tar.gz
   hosts: all
   gather_facts: true
 
@@ -28,6 +28,7 @@
     - name: Pick first existing log
       ansible.builtin.set_fact:
         su_log_found: "{{ (su_stats.results | selectattr('stat.exists') | map(attribute='stat.path') | list | first) | default(omit) }}"
+        su_base: "{{ ((su_stats.results | selectattr('stat.exists') | map(attribute='stat.path') | list | first) | basename) | default(omit) }}"
 
     - name: Fail if no suitable su/auth log found
       ansible.builtin.fail:
@@ -43,19 +44,23 @@
     - name: Copy su/auth log into /tmp
       ansible.builtin.copy:
         src: "{{ su_log_found }}"
-        dest: "{{ tmp_dir }}/{{ su_log_found | basename }}"
+        dest: "{{ tmp_dir }}/{{ su_base }}"
         remote_src: true
         mode: "0640"
 
-    - name: Create tar.gz archive in /tmp
-      community.general.archive:
-        path: "{{ tmp_dir }}/{{ su_log_found | basename }}"
-        dest: "{{ tmp_dir }}/{{ su_log_found | basename }}.tar.gz"
-        format: gz
-        remove: false
+    - name: Create tar.gz archive in /tmp (via tar)
+      ansible.builtin.command:
+        cmd:
+          - /usr/bin/tar
+          - -czf
+          - "{{ tmp_dir }}/{{ su_base }}.tar.gz"
+          - "{{ su_base }}"
+        chdir: "{{ tmp_dir }}"
+        creates: "{{ tmp_dir }}/{{ su_base }}.tar.gz"
 
     - name: Report archive path
       ansible.builtin.debug:
         msg:
           source_log: "{{ su_log_found }}"
-          archive: "{{ tmp_dir }}/{{ su_log_found | basename }}.tar.gz"
+          copied_to: "{{ tmp_dir }}/{{ su_base }}"
+          archive: "{{ tmp_dir }}/{{ su_base }}.tar.gz"
