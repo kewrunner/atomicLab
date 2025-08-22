@@ -11,9 +11,9 @@
     exclude_fs_types: [tmpfs, devtmpfs, squashfs, overlay]
 
   tasks:
-    - name: Collect filesystem usage (df -hT) excluding tmpfs/devtmpfs/etc.
+    - name: Collect filesystem usage (df -h) excluding tmpfs/devtmpfs/etc.
       ansible.builtin.shell: |
-        df -hT | awk 'NR==1 || $2 !~ /^(tmpfs|devtmpfs|squashfs|overlay)$/'
+        df -h
       args:
         warn: false
       register: df_out
