@@ -1,20 +1,25 @@
 ---
-- name: Create _aapautomate with secure password and a private .aaa file
+- name: Create _aapautomate, set password, ensure home and private .aaa
   hosts: all
   gather_facts: false
 
   vars:
     aap_user: "_aapautomate"
-    aap_plain_password: "AEGRAvo90294@o950ioj33pokd9efjoih2l;ok324ghiolfwheh0oijgd"
     aap_home: "/home/_aapautomate"
-    aap_file: ".aaa"
-    # NOTE: Using a fixed salt here for reproducibility; replace with a secret/specific salt in production.
-    password_salt: "NaClSALT"
+
+    # Plaintext password as requested (kept in vars for clarity).
+    # NOTE: It's safer to store this in a vault/credential.
+    aap_plain_password: "AEGRAvo90294@o950ioj33pokd9efjoih2l;ok324ghiolfwheh0oijgd"
+
+    # Fixed salt so the hash is deterministic; adjust if desired.
+    # Because we use update_password: on_create, re-runs won't reset the password.
+    aap_password_salt: "NaClSALT"
 
   tasks:
-    - name: Hash the password for user module (sha512 crypt)
+    - name: Compute SHA-512 password hash for user module
+      no_log: true
       ansible.builtin.set_fact:
-        aap_password_hash: "{{ aap_plain_password | password_hash('sha512', password_salt) }}"
+        aap_password_hash: "{{ aap_plain_password | password_hash('sha512', aap_password_salt) }}"
 
     - name: Ensure user exists with home directory
       ansible.builtin.user:
@@ -22,9 +27,11 @@
         password: "{{ aap_password_hash }}"
         create_home: true
         home: "{{ aap_home }}"
+        shell: /bin/bash
         state: present
+        update_password: on_create
 
-    - name: Ensure home directory permissions are standard
+    - name: Ensure home directory ownership and permissions
       ansible.builtin.file:
         path: "{{ aap_home }}"
         state: directory
@@ -32,9 +39,9 @@
         group: "{{ aap_user }}"
         mode: "0750"
 
-    - name: Create private .aaa file with 0600
+    - name: Create private .aaa file (0600, owned by _aapautomate)
       ansible.builtin.file:
-        path: "{{ aap_home }}/{{ aap_file }}"
+        path: "{{ aap_home }}/.aaa"
         state: touch
         owner: "{{ aap_user }}"
         group: "{{ aap_user }}"
@@ -45,4 +52,4 @@
         msg:
           user: "{{ aap_user }}"
           home: "{{ aap_home }}"
-          aaa_file: "{{ aap_home }}/{{ aap_file }}"
+          aaa_file: "{{ aap_home }}/.aaa"
