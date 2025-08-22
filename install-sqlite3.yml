@@ -1,0 +1,29 @@
+---
+- name: Install sqlite3 on Ubuntu, CentOS, and RHEL
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  tasks:
+    - name: Install sqlite3 on Debian/Ubuntu
+      ansible.builtin.apt:
+        name: sqlite3
+        state: present
+        update_cache: yes
+      when: ansible_facts['os_family'] == "Debian"
+
+    - name: Install sqlite3 on RedHat (RHEL/CentOS 7/8/9)
+      ansible.builtin.yum:
+        name: sqlite
+        state: present
+      when: ansible_facts['os_family'] == "RedHat"
+
+    # Optional: verify installation
+    - name: Check sqlite3 version
+      ansible.builtin.command: sqlite3 --version
+      register: sqlite_version
+      changed_when: false
+
+    - name: Show installed sqlite3 version
+      ansible.builtin.debug:
+        msg: "Installed sqlite3 version: {{ sqlite_version.stdout }}"
