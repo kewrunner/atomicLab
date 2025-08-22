@@ -9,11 +9,11 @@
 
     # Plaintext password as requested (kept in vars for clarity).
     # NOTE: It's safer to store this in a vault/credential.
-    aap_plain_password: "AEGRAvo90294@o950ioj33pokd9efjoih2l;ok324ghiolfwheh0oijgd"
+    aap_plain_password: "aaaaaaaaaaaaaa"
 
     # Fixed salt so the hash is deterministic; adjust if desired.
     # Because we use update_password: on_create, re-runs won't reset the password.
-    aap_password_salt: "NaClSALT"
+    aap_password_salt: "bbbbbbbbbbbbbbbb"
 
   tasks:
     - name: Compute SHA-512 password hash for user module
