@@ -1,0 +1,56 @@
+---
+- name: Extract categorized tails from /var/log/messages
+  hosts: all
+  gather_facts: false
+
+  vars:
+    log_path: /var/log/messages
+    patterns:
+      user_login: '(sshd\\[.*\\]: Accepted|systemd-logind|LOGIN|pam_unix\\(sshd:session\\))'
+      security: '(sudo|polkit|semanage|setroubleshoot|audit|security)'
+      system: '(kernel:|systemd\\[|NetworkManager|udevd|crond|chronyd)'
+    tail_count: 10
+
+  tasks:
+    - name: Check if /var/log/messages exists
+      ansible.builtin.stat:
+        path: "{{ log_path }}"
+      register: log_stat
+
+    - name: Fail if log file missing
+      ansible.builtin.fail:
+        msg: "{{ log_path }} not found on this host."
+      when: not log_stat.stat.exists
+
+    - name: Read /var/log/messages
+      ansible.builtin.slurp:
+        src: "{{ log_path }}"
+      register: messages_raw
+
+    - name: Build categorized tails
+      ansible.builtin.set_fact:
+        messages_lines: "{{ messages_raw.content | b64decode | splitlines() }}"
+        user_login_lines: >-
+          {{ messages_lines
+             | select('search', patterns.user_login)
+             | list | tail(tail_count) }}
+        security_lines: >-
+          {{ messages_lines
+             | select('search', patterns.security)
+             | list | tail(tail_count) }}
+        system_lines: >-
+          {{ messages_lines
+             | select('search', patterns.system)
+             | list | tail(tail_count) }}
+
+    - name: Report last 10 user login lines
+      ansible.builtin.debug:
+        msg: "{{ user_login_lines }}"
+
+    - name: Report last 10 security lines
+      ansible.builtin.debug:
+        msg: "{{ security_lines }}"
+
+    - name: Report last 10 system lines
+      ansible.builtin.debug:
+        msg: "{{ system_lines }}"

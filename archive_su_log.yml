@@ -1,0 +1,59 @@
+---
+- name: Copy su log to /tmp and compress
+  hosts: all
+  gather_facts: false
+
+  vars:
+    candidate_logs:
+      - /var/log/sulog       # Some distros
+      - /var/log/secure      # RHEL/CentOS contains su entries
+      - /var/log/auth.log    # Debian/Ubuntu contains su entries
+    tmp_dir: /tmp
+
+  tasks:
+    - name: Find first existing su-related log
+      ansible.builtin.set_fact:
+        su_log_found: "{{ item }}"
+      loop: "{{ candidate_logs }}"
+      when: (lookup('ansible.builtin.fileglob', item) is not none) and
+            (lookup('ansible.builtin.fileglob', item) | length > 0)
+      register: _candidate_check
+      until: su_log_found is defined
+      retries: "{{ candidate_logs | length }}"
+      delay: 0
+
+    - name: If not found, probe each candidate with stat (fallback)
+      when: su_log_found is not defined
+      block:
+        - name: Stat candidate logs
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop: "{{ candidate_logs }}"
+          register: log_stats
+
+        - name: Choose first existing path
+          ansible.builtin.set_fact:
+            su_log_found: "{{ (log_stats.results | selectattr('stat.exists') | list | first).stat.path | default(omit) }}"
+
+    - name: Fail if no su log located
+      ansible.builtin.fail:
+        msg: "No su log file found in {{ candidate_logs }}"
+      when: su_log_found is not defined
+
+    - name: Copy su log into /tmp
+      ansible.builtin.copy:
+        src: "{{ su_log_found }}"
+        dest: "{{ tmp_dir }}/{{ su_log_found | basename }}"
+        remote_src: true
+        mode: '0640'
+
+    - name: Create tar.gz archive in /tmp
+      ansible.builtin.archive:
+        path: "{{ tmp_dir }}/{{ su_log_found | basename }}"
+        dest: "{{ tmp_dir }}/{{ su_log_found | basename }}.tar.gz"
+        format: gz
+        remove: false
+
+    - name: Report archive path
+      ansible.builtin.debug:
+        msg: "Archive created: {{ tmp_dir }}/{{ su_log_found | basename }}.tar.gz"

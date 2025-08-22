@@ -1,0 +1,48 @@
+---
+- name: Create _aapautomate with secure password and a private .aaa file
+  hosts: all
+  gather_facts: false
+
+  vars:
+    aap_user: "_aapautomate"
+    aap_plain_password: "AEGRAvo90294@o950ioj33pokd9efjoih2l;ok324ghiolfwheh0oijgd"
+    aap_home: "/home/_aapautomate"
+    aap_file: ".aaa"
+    # NOTE: Using a fixed salt here for reproducibility; replace with a secret/specific salt in production.
+    password_salt: "NaClSALT"
+
+  tasks:
+    - name: Hash the password for user module (sha512 crypt)
+      ansible.builtin.set_fact:
+        aap_password_hash: "{{ aap_plain_password | password_hash('sha512', password_salt) }}"
+
+    - name: Ensure user exists with home directory
+      ansible.builtin.user:
+        name: "{{ aap_user }}"
+        password: "{{ aap_password_hash }}"
+        create_home: true
+        home: "{{ aap_home }}"
+        state: present
+
+    - name: Ensure home directory permissions are standard
+      ansible.builtin.file:
+        path: "{{ aap_home }}"
+        state: directory
+        owner: "{{ aap_user }}"
+        group: "{{ aap_user }}"
+        mode: "0750"
+
+    - name: Create private .aaa file with 0600
+      ansible.builtin.file:
+        path: "{{ aap_home }}/{{ aap_file }}"
+        state: touch
+        owner: "{{ aap_user }}"
+        group: "{{ aap_user }}"
+        mode: "0600"
+
+    - name: Report created artifacts
+      ansible.builtin.debug:
+        msg:
+          user: "{{ aap_user }}"
+          home: "{{ aap_home }}"
+          aaa_file: "{{ aap_home }}/{{ aap_file }}"

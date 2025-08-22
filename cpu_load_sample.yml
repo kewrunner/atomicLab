@@ -1,0 +1,44 @@
+---
+- name: Sample CPU load for 3 minutes
+  hosts: all
+  gather_facts: false
+
+  vars:
+    sample_interval_seconds: 30
+    total_minutes: 3
+    samples: "{{ (total_minutes * 60) // sample_interval_seconds }}"
+
+  tasks:
+    - name: Initialize results list
+      ansible.builtin.set_fact:
+        load_samples: []
+
+    - name: Take loadavg sample {{ item }}/{{ samples }}
+      loop: "{{ range(1, samples | int + 1) | list }}"
+      vars:
+        _now: "{{ ansible_date_time.iso8601_basic if ansible_date_time is defined else lookup('ansible.builtin.pipe','date -u +%Y%m%dT%H%M%SZ') }}"
+      block:
+        - name: Read /proc/loadavg
+          ansible.builtin.slurp:
+            src: /proc/loadavg
+          register: _slurp_load
+
+        - name: Parse load averages
+          ansible.builtin.set_fact:
+            load_samples: >-
+              {{ load_samples + [{
+                   'timestamp': _now,
+                   'raw': (_slurp_load.content | b64decode | trim),
+                   'avg_1':  (_slurp_load.content | b64decode | trim).split()[0] | float,
+                   'avg_5':  (_slurp_load.content | b64decode | trim).split()[1] | float,
+                   'avg_15': (_slurp_load.content | b64decode | trim).split()[2] | float
+                 }] }}
+
+        - name: Wait between samples
+          when: item < samples
+          ansible.builtin.pause:
+            seconds: "{{ sample_interval_seconds }}"
+
+    - name: Report collected load averages
+      ansible.builtin.debug:
+        var: load_samples

@@ -1,0 +1,23 @@
+---
+- name: Ensure sqlite3 is installed
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Collect installed packages
+      ansible.builtin.package_facts:
+        manager: auto
+
+    - name: Show current sqlite3 presence
+      ansible.builtin.debug:
+        msg: >-
+          sqlite3 installed: {{
+            'sqlite3' in ansible_facts.packages or
+            'sqlite' in ansible_facts.packages
+          }}
+
+    - name: Install sqlite3 (if missing)
+      ansible.builtin.package:
+        name:
+          - sqlite3
+        state: present
