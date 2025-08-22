@@ -1,66 +1,111 @@
 ---
-- name: Extract categorized tails from logs (cross-distro)
+- name: Extract categorized tails from logs (Ubuntu 22/24 + RHEL-like)
   hosts: all
-  gather_facts: true   # Needed for ansible_distribution fact
+  gather_facts: true
   vars:
     tail_count: 10
 
-  tasks:
-    - name: Choose candidate log files by distribution
-      ansible.builtin.set_fact:
-        candidate_logs: >-
-          {{ 
-            (ansible_distribution in ['Ubuntu'] | ternary(
-               ['/var/log/auth.log', '/var/log/syslog'],
-               ['/var/log/messages']
-             ))
-          }}
+    # Regex buckets (kept broad; tweak to fit your site)
+    re_user_login: '(sshd.*Accepted|systemd-logind|LOGIN|pam_unix.*session)'
+    re_security: '(sudo|polkit|audit|security)'
+    re_system: '(kernel:|systemd|NetworkManager|udevd|crond|chronyd)'
 
-    - name: Verify which log files exist
+  tasks:
+    - name: Compute distro flags
+      ansible.builtin.set_fact:
+        is_ubuntu: "{{ (ansible_facts.distribution | lower) == 'ubuntu' }}"
+        is_rhel_family: "{{ (ansible_facts.os_family | lower) == 'redhat' }}"
+
+    - name: Build candidate lists (always lists, never booleans)
+      ansible.builtin.set_fact:
+        login_candidates: >-
+          {{ (is_ubuntu | ternary(
+                ['/var/log/auth.log', '/var/log/secure', '/var/log/messages'],
+                ['/var/log/secure', '/var/log/messages', '/var/log/auth.log']
+              )) }}
+        security_candidates: >-
+          {{ (is_ubuntu | ternary(
+                ['/var/log/auth.log', '/var/log/secure', '/var/log/messages'],
+                ['/var/log/secure', '/var/log/messages', '/var/log/auth.log']
+              )) }}
+        system_candidates: >-
+          {{ (is_ubuntu | ternary(
+                ['/var/log/syslog', '/var/log/messages'],
+                ['/var/log/messages', '/var/log/syslog']
+              )) }}
+
+    - name: Stat login candidate logs
       ansible.builtin.stat:
         path: "{{ item }}"
-      loop: "{{ candidate_logs }}"
-      register: log_stats
+      loop: "{{ login_candidates }}"
+      register: login_stats
 
-    - name: Pick the first existing log file
+    - name: Stat security candidate logs
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ security_candidates }}"
+      register: security_stats
+
+    - name: Stat system candidate logs
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop: "{{ system_candidates }}"
+      register: system_stats
+
+    - name: Pick first existing file per category
       ansible.builtin.set_fact:
-        log_path: "{{ (log_stats.results | selectattr('stat.exists') | list | first).stat.path }}"
-      when: (log_stats.results | selectattr('stat.exists') | list | length) > 0
+        login_log: >-
+          {{ (login_stats.results | selectattr('stat.exists') | map(attribute='stat.path') | list | first) | default(omit) }}
+        security_log: >-
+          {{ (security_stats.results | selectattr('stat.exists') | map(attribute='stat.path') | list | first) | default(omit) }}
+        system_log: >-
+          {{ (system_stats.results | selectattr('stat.exists') | map(attribute='stat.path') | list | first) | default(omit) }}
 
-    - name: Fail if no usable log file found
-      ansible.builtin.fail:
-        msg: "No suitable log file found for {{ ansible_distribution }}"
-      when: log_path is not defined
-
-    - name: Read selected log file
+    - name: Read login log (if found)
+      when: login_log is defined
       ansible.builtin.slurp:
-        src: "{{ log_path }}"
-      register: log_raw
+        src: "{{ login_log }}"
+      register: login_raw
 
-    - name: Parse log lines
-      ansible.builtin.set_fact:
-        log_lines: "{{ log_raw.content | b64decode | splitlines() }}"
+    - name: Read security log (if found)
+      when: security_log is defined
+      ansible.builtin.slurp:
+        src: "{{ security_log }}"
+      register: security_raw
 
-    - name: Select last 10 user login events
-      ansible.builtin.set_fact:
-        user_login_lines: "{{ log_lines | select('search', '(sshd.*Accepted|systemd-logind|LOGIN|pam_unix.*session)') | list | tail(tail_count) }}"
+    - name: Read system log (if found)
+      when: system_log is defined
+      ansible.builtin.slurp:
+        src: "{{ system_log }}"
+      register: system_raw
 
-    - name: Select last 10 security events
+    - name: Parse lines for each category (empty list if missing)
       ansible.builtin.set_fact:
-        security_lines: "{{ log_lines | select('search', '(sudo|polkit|audit|security)') | list | tail(tail_count) }}"
+        login_lines: "{{ (login_raw.content | b64decode | splitlines()) if (login_log is defined) else [] }}"
+        security_lines: "{{ (security_raw.content | b64decode | splitlines()) if (security_log is defined) else [] }}"
+        system_lines: "{{ (system_raw.content | b64decode | splitlines()) if (system_log is defined) else [] }}"
 
-    - name: Select last 10 system events
+    - name: Build categorized tails
       ansible.builtin.set_fact:
-        system_lines: "{{ log_lines | select('search', '(kernel:|systemd|NetworkManager|udevd|crond|chronyd)') | list | tail(tail_count) }}"
+        user_login_tail: "{{ (login_lines | select('search', re_user_login) | list) | tail(tail_count) }}"
+        security_tail: "{{ (security_lines | select('search', re_security) | list) | tail(tail_count) }}"
+        system_tail: "{{ (system_lines | select('search', re_system) | list) | tail(tail_count) }}"
+
+    - name: Report log sources picked
+      ansible.builtin.debug:
+        msg:
+          login_log: "{{ login_log | default('not found') }}"
+          security_log: "{{ security_log | default('not found') }}"
+          system_log: "{{ system_log | default('not found') }}"
 
     - name: Report last 10 user login lines
       ansible.builtin.debug:
-        msg: "{{ user_login_lines }}"
+        msg: "{{ user_login_tail }}"
 
     - name: Report last 10 security lines
       ansible.builtin.debug:
-        msg: "{{ security_lines }}"
+        msg: "{{ security_tail }}"
 
     - name: Report last 10 system lines
       ansible.builtin.debug:
-        msg: "{{ system_lines }}"
+        msg: "{{ system_tail }}"
