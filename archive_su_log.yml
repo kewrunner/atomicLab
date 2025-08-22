@@ -1,5 +1,5 @@
 ---
-- name: Copy su/auth log to /tmp and compress to .tar.gz
+- name: Copy su/auth log to /tmp and compress to .tar.gz (Ubuntu 22/24 & RHEL/CentOS)
   hosts: all
   gather_facts: true
 
@@ -7,7 +7,7 @@
     tmp_dir: /tmp
 
   tasks:
-    - name: Detect distro family
+    - name: Detect Ubuntu
       ansible.builtin.set_fact:
         is_ubuntu: "{{ (ansible_facts.distribution | lower) == 'ubuntu' }}"
 
@@ -48,10 +48,15 @@
         remote_src: true
         mode: "0640"
 
-    - name: Create tar.gz archive in /tmp (via tar)
+    - name: Ensure tar is installed
+      ansible.builtin.package:
+        name: tar
+        state: present
+
+    - name: Create tar.gz archive in /tmp (via tar, using argv)
       ansible.builtin.command:
-        cmd:
-          - /usr/bin/tar
+        argv:
+          - tar
           - -czf
           - "{{ tmp_dir }}/{{ su_base }}.tar.gz"
           - "{{ su_base }}"
