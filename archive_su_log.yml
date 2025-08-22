@@ -1,5 +1,5 @@
 ---
-- name: Copy su log to /tmp and compress to .tar.gz (cross-distro)
+- name: Copy su log to /tmp and compress (Ubuntu 22/24 & RHEL/CentOS)
   hosts: all
   gather_facts: true
 
@@ -7,61 +7,55 @@
     tmp_dir: /tmp
 
   tasks:
-    - name: Determine distro flags
+    - name: Detect distro family
       ansible.builtin.set_fact:
         is_ubuntu: "{{ (ansible_facts.distribution | lower) == 'ubuntu' }}"
 
-    - name: Build candidate su log list (ordered by preference)
+    - name: Build candidate su/auth log list (ordered)
       ansible.builtin.set_fact:
         su_candidates: >-
           {{ (is_ubuntu | ternary(
-                ['/var/log/sulog', '/var/log/auth.log', '/var/log/secure'],
-                ['/var/log/sulog', '/var/log/secure', '/var/log/auth.log']
+                ['/var/log/auth.log'],
+                ['/var/log/secure', '/var/log/sulog', '/var/log/messages', '/var/log/auth.log']
               )) }}
 
-    - name: Stat candidate su logs
+    - name: Stat candidate logs
       ansible.builtin.stat:
         path: "{{ item }}"
       loop: "{{ su_candidates }}"
       register: su_stats
 
-    - name: Choose first existing su log
+    - name: Pick first existing log
       ansible.builtin.set_fact:
-        su_log_found: >-
-          {{ (su_stats.results
-              | selectattr('stat.exists')
-              | map(attribute='stat.path')
-              | list
-              | first) | default(omit) }}
+        su_log_found: "{{ (su_stats.results | selectattr('stat.exists') | map(attribute='stat.path') | list | first) | default(omit) }}"
 
-    - name: Fail if no su log located
+    - name: Fail if no suitable su/auth log found
       ansible.builtin.fail:
-        msg: "No su-related log found. Checked: {{ su_candidates | join(', ') }}"
+        msg: "No su/auth log found. Checked: {{ su_candidates }}"
       when: su_log_found is not defined
 
-    - name: Compute destination paths and archive name
-      ansible.builtin.set_fact:
-        su_basename: "{{ su_log_found | basename }}"
-        su_copy_path: "{{ tmp_dir }}/{{ su_log_found | basename }}"
-        su_archive_path: "{{ tmp_dir }}/{{ (su_log_found | basename) }}.tar.gz"
+    - name: Ensure /tmp exists with sane perms
+      ansible.builtin.file:
+        path: "{{ tmp_dir }}"
+        state: directory
+        mode: "1777"
 
-    - name: Copy su log into /tmp
+    - name: Copy su/auth log into /tmp
       ansible.builtin.copy:
         src: "{{ su_log_found }}"
-        dest: "{{ su_copy_path }}"
+        dest: "{{ tmp_dir }}/{{ su_log_found | basename }}"
         remote_src: true
-        mode: '0640'
+        mode: "0640"
 
     - name: Create tar.gz archive in /tmp
       ansible.builtin.archive:
-        path: "{{ su_copy_path }}"
-        dest: "{{ su_archive_path }}"
+        path: "{{ tmp_dir }}/{{ su_log_found | basename }}"
+        dest: "{{ tmp_dir }}/{{ su_log_found | basename }}.tar.gz"
         format: gz
         remove: false
 
-    - name: Report results
+    - name: Report archive path
       ansible.builtin.debug:
         msg:
-          picked_log: "{{ su_log_found }}"
-          copied_to: "{{ su_copy_path }}"
-          archive: "{{ su_archive_path }}"
+          source_log: "{{ su_log_found }}"
+          archive: "{{ tmp_dir }}/{{ su_log_found | basename }}.tar.gz"
