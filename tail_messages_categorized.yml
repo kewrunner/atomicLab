@@ -5,34 +5,30 @@
   vars:
     tail_count: 10
 
-    # Regex buckets (kept broad; tweak to fit your site)
+    # Broad patterns; tune to your environment
     re_user_login: '(sshd.*Accepted|systemd-logind|LOGIN|pam_unix.*session)'
-    re_security: '(sudo|polkit|audit|security)'
-    re_system: '(kernel:|systemd|NetworkManager|udevd|crond|chronyd)'
+    re_security:   '(sudo|polkit|audit|security)'
+    re_system:     '(kernel:|systemd|NetworkManager|udevd|crond|chronyd)'
 
   tasks:
     - name: Compute distro flags
       ansible.builtin.set_fact:
         is_ubuntu: "{{ (ansible_facts.distribution | lower) == 'ubuntu' }}"
-        is_rhel_family: "{{ (ansible_facts.os_family | lower) == 'redhat' }}"
 
-    - name: Build candidate lists (always lists, never booleans)
+    - name: Build candidate lists (always lists)
       ansible.builtin.set_fact:
         login_candidates: >-
-          {{ (is_ubuntu | ternary(
-                ['/var/log/auth.log', '/var/log/secure', '/var/log/messages'],
-                ['/var/log/secure', '/var/log/messages', '/var/log/auth.log']
-              )) }}
+          {{ is_ubuntu
+             | ternary(['/var/log/auth.log', '/var/log/secure', '/var/log/messages'],
+                       ['/var/log/secure',   '/var/log/messages', '/var/log/auth.log']) }}
         security_candidates: >-
-          {{ (is_ubuntu | ternary(
-                ['/var/log/auth.log', '/var/log/secure', '/var/log/messages'],
-                ['/var/log/secure', '/var/log/messages', '/var/log/auth.log']
-              )) }}
+          {{ is_ubuntu
+             | ternary(['/var/log/auth.log', '/var/log/secure', '/var/log/messages'],
+                       ['/var/log/secure',   '/var/log/messages', '/var/log/auth.log']) }}
         system_candidates: >-
-          {{ (is_ubuntu | ternary(
-                ['/var/log/syslog', '/var/log/messages'],
-                ['/var/log/messages', '/var/log/syslog']
-              )) }}
+          {{ is_ubuntu
+             | ternary(['/var/log/syslog', '/var/log/messages'],
+                       ['/var/log/messages','/var/log/syslog']) }}
 
     - name: Stat login candidate logs
       ansible.builtin.stat:
@@ -54,49 +50,43 @@
 
     - name: Pick first existing file per category
       ansible.builtin.set_fact:
-        login_log: >-
-          {{ (login_stats.results | selectattr('stat.exists') | map(attribute='stat.path') | list | first) | default(omit) }}
-        security_log: >-
-          {{ (security_stats.results | selectattr('stat.exists') | map(attribute='stat.path') | list | first) | default(omit) }}
-        system_log: >-
-          {{ (system_stats.results | selectattr('stat.exists') | map(attribute='stat.path') | list | first) | default(omit) }}
+        login_log:   "{{ (login_stats.results   | selectattr('stat.exists') | map(attribute='stat.path') | list | first) | default(omit) }}"
+        security_log:"{{ (security_stats.results| selectattr('stat.exists') | map(attribute='stat.path') | list | first) | default(omit) }}"
+        system_log:  "{{ (system_stats.results  | selectattr('stat.exists') | map(attribute='stat.path') | list | first) | default(omit) }}"
 
-    - name: Read login log (if found)
-      when: login_log is defined
+    - name: Read chosen logs (if found)
       ansible.builtin.slurp:
-        src: "{{ login_log }}"
-      register: login_raw
+        src: "{{ item }}"
+      loop: "{{ [login_log | default(omit), security_log | default(omit), system_log | default(omit)] | select('defined') | list }}"
+      register: slurps
 
-    - name: Read security log (if found)
-      when: security_log is defined
-      ansible.builtin.slurp:
-        src: "{{ security_log }}"
-      register: security_raw
-
-    - name: Read system log (if found)
-      when: system_log is defined
-      ansible.builtin.slurp:
-        src: "{{ system_log }}"
-      register: system_raw
-
-    - name: Parse lines for each category (empty list if missing)
+    - name: Normalize slurped content into vars (text + lines)
       ansible.builtin.set_fact:
-        login_lines: "{{ (login_raw.content | b64decode | splitlines()) if (login_log is defined) else [] }}"
-        security_lines: "{{ (security_raw.content | b64decode | splitlines()) if (security_log is defined) else [] }}"
-        system_lines: "{{ (system_raw.content | b64decode | splitlines()) if (system_log is defined) else [] }}"
+        login_text: >-
+          {{ (slurps.results | selectattr('source','equalto', login_log)   | map(attribute='content') | list | first | default('') | b64decode)
+             | regex_replace('\r\n?','\n') if login_log is defined else '' }}
+        security_text: >-
+          {{ (slurps.results | selectattr('source','equalto', security_log) | map(attribute='content') | list | first | default('') | b64decode)
+             | regex_replace('\r\n?','\n') if security_log is defined else '' }}
+        system_text: >-
+          {{ (slurps.results | selectattr('source','equalto', system_log)   | map(attribute='content') | list | first | default('') | b64decode)
+             | regex_replace('\r\n?','\n') if system_log is defined else '' }}
+        login_lines:   "{{ (login_text   | default('')) | split('\n') }}"
+        security_lines:"{{ (security_text | default('')) | split('\n') }}"
+        system_lines:  "{{ (system_text   | default('')) | split('\n') }}"
 
     - name: Build categorized tails
       ansible.builtin.set_fact:
-        user_login_tail: "{{ (login_lines | select('search', re_user_login) | list) | tail(tail_count) }}"
-        security_tail: "{{ (security_lines | select('search', re_security) | list) | tail(tail_count) }}"
-        system_tail: "{{ (system_lines | select('search', re_system) | list) | tail(tail_count) }}"
+        user_login_tail: "{{ (login_lines   | select('search', re_user_login) | list) | tail(tail_count) }}"
+        security_tail:   "{{ (security_lines| select('search', re_security)   | list) | tail(tail_count) }}"
+        system_tail:     "{{ (system_lines  | select('search', re_system)     | list) | tail(tail_count) }}"
 
     - name: Report log sources picked
       ansible.builtin.debug:
         msg:
-          login_log: "{{ login_log | default('not found') }}"
-          security_log: "{{ security_log | default('not found') }}"
-          system_log: "{{ system_log | default('not found') }}"
+          login_log:   "{{ login_log   | default('not found') }}"
+          security_log:"{{ security_log| default('not found') }}"
+          system_log:  "{{ system_log  | default('not found') }}"
 
     - name: Report last 10 user login lines
       ansible.builtin.debug:
