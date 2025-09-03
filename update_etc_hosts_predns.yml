@@ -1,0 +1,21 @@
+---
+- name: Update /etc/hosts on all lab hosts
+  hosts: all
+  become: yes
+  tasks:
+    - name: Ensure lab host entries are present in /etc/hosts
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        block: |
+          192.168.1.76    lab-ubuntu-2404-n8n localhost
+          192.168.1.153   lab-ubuntu-2404-monitoring
+          192.168.1.170   lab-ubuntu-2404-boltdiy
+          192.168.1.138   lab-ubuntu-logger
+          192.168.1.190   lab-ubuntu-2204-jenkins
+          192.168.1.76    lab-ubuntu-2404-n8n
+          192.168.1.75    lab-centos8-kickstart
+          192.168.1.185   lab-ubuntu-2204-ns1
+        marker: "# {mark} LAB HOST ENTRIES"
+        state: present
+        create: yes
+        backup: yes
