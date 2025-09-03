@@ -15,6 +15,8 @@
           192.168.1.76    lab-ubuntu-2404-n8n
           192.168.1.75    lab-centos8-kickstart
           192.168.1.185   lab-ubuntu-2204-ns1
+          192.168.1.148   lab-rhel9-app.atomiclabs.com
+          192.168.1.140   lab-ubuntu-2404-awx-secondary
         marker: "# {mark} LAB HOST ENTRIES"
         state: present
         create: yes

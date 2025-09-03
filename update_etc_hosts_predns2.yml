@@ -1,0 +1,44 @@
+---
+- name: Replace /etc/hosts safely on all hosts
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    hosts_file_content: |
+      # Managed by Ansible — LAB hosts
+      # Keep localhost defaults to avoid breaking local resolution
+      127.0.0.1   localhost
+      ::1         ip6-localhost ip6-loopback
+      ff02::1     ip6-allnodes
+      ff02::2     ip6-allrouters
+
+      192.168.1.76    lab-ubuntu-2404-n8n localhost
+      192.168.1.153   lab-ubuntu-2404-monitoring
+      192.168.1.170   lab-ubuntu-2404-boltdiy
+      192.168.1.138   lab-ubuntu-logger
+      192.168.1.190   lab-ubuntu-2204-jenkins
+      192.168.1.76    lab-ubuntu-2404-n8n
+      192.168.1.75    lab-centos8-kickstart
+      192.168.1.185   lab-ubuntu-2204-ns1
+      192.168.1.148   lab-rhel9-app.atomiclabs.com
+      192.168.1.140   lab-ubuntu-2404-awx-secondary
+
+  tasks:
+    - name: Backup current /etc/hosts to timestamped file (remote)
+    # Creates e.g. /etc/hosts.backup.20250902_201530
+      ansible.builtin.copy:
+        src: /etc/hosts
+        dest: "/etc/hosts.backup.{{ ansible_date_time.iso8601_basic | regex_replace('T','_') }}"
+        remote_src: true
+        mode: '0644'
+      ignore_errors: true  # In case /etc/hosts is missing on a host
+
+    - name: Replace /etc/hosts with new content (also keep an extra backup)
+      ansible.builtin.copy:
+        dest: /etc/hosts
+        content: "{{ hosts_file_content }}"
+        owner: root
+        group: root
+        mode: '0644'
+        backup: yes
