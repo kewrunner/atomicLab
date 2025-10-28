@@ -1,7 +1,8 @@
 ---
 - name: Filesystem report and largest files under /home (Ubuntu / RHEL / CentOS)
   hosts: all
-  become: yes
+  become: true
+  become_method: sudo
   gather_facts: yes
 
   vars:
