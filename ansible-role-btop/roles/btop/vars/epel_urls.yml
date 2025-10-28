@@ -1,0 +1,6 @@
+---
+# EPEL release RPM URLs by EL major version
+epel_release_rpm:
+  "7": "https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm"
+  "8": "https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm"
+  "9": "https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm"

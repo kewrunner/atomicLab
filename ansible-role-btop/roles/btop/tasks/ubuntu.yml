@@ -1,0 +1,21 @@
+---
+- name: Update apt cache
+  apt:
+    update_cache: yes
+  when: btop_update_cache | bool
+
+- name: Ensure btop is installed (Ubuntu)
+  apt:
+    name: btop
+    state: "{{ btop_state }}"
+  register: btop_pkg
+
+- name: Verify btop
+  shell: btop --version
+  register: btop_version_check
+  changed_when: false
+  failed_when: false
+
+- name: Debug btop version
+  debug:
+    var: btop_version_check.stdout

@@ -1,0 +1,50 @@
+---
+- name: Derive EL major version
+  set_fact:
+    el_major: "{{ ansible_distribution_major_version | string }}"
+
+- name: Ensure CRB/PowerTools is enabled on EL >= 8 (Rocky/Alma/RHEL)
+  when: el_major is version('8', '>=')
+  block:
+    - name: Enable CRB repo (Rocky/Alma/RHEL)
+      command: dnf config-manager --set-enabled crb
+      args:
+        warn: false
+      register: crb_out
+      changed_when: "'enabled' in crb_out.stdout or crb_out.rc == 0"
+      failed_when: false
+
+- name: Enable EPEL on Red Hat via release RPM (no subscription required)
+  when: btop_epel_enable and ansible_distribution == "RedHat"
+  package:
+    name: "{{ epel_release_rpm[el_major] }}"
+    state: present
+
+- name: Enable EPEL via package on CentOS/Rocky/Alma
+  when: btop_epel_enable and ansible_distribution in ['CentOS','Rocky','AlmaLinux','OracleLinux']
+  package:
+    name: epel-release
+    state: present
+
+- name: Refresh package metadata (EL)
+  when: btop_update_cache | bool
+  package:
+    name: dnf-plugins-core
+    state: present
+  register: _dnfplugins
+  failed_when: false
+
+- name: Install btop (EL)
+  package:
+    name: btop
+    state: "{{ btop_state }}"
+
+- name: Verify btop
+  command: btop --version
+  register: btop_version_check
+  changed_when: false
+  failed_when: false
+
+- name: Debug btop version
+  debug:
+    var: btop_version_check.stdout

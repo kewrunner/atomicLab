@@ -1,0 +1,5 @@
+---
+btop_state: present           # present|latest|absent
+btop_install_from_source: false
+btop_update_cache: true
+btop_epel_enable: true

@@ -1,0 +1,16 @@
+---
+- name: Include EPEL URL map
+  include_vars:
+    file: epel_urls.yml
+
+- name: Gather package facts (ensure available facts)
+  package_facts:
+    manager: auto
+
+- name: "Include tasks for RedHat family"
+  include_tasks: rhel.yml
+  when: ansible_os_family == "RedHat"
+
+- name: "Include tasks for Debian/Ubuntu family"
+  include_tasks: ubuntu.yml
+  when: ansible_os_family == "Debian"

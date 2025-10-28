@@ -1,0 +1,7 @@
+---
+- name: Install btop across fleets
+  hosts: all
+  become: true
+  gather_facts: true
+  roles:
+    - btop
