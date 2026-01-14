@@ -1,0 +1,35 @@
+---
+- name: Restart rsyslog across Linux lab environment
+  hosts: linux_servers
+  become: true
+  gather_facts: yes
+
+  vars:
+    rsyslog_service_name: "{{ 'syslog' if ansible_facts.os_family == 'Suse' else 'rsyslog' }}"
+
+  tasks:
+
+    - name: Ensure rsyslog service is present on host
+      ansible.builtin.service_facts:
+
+    - name: Validate service exists before calling handler
+      ansible.builtin.assert:
+        that:
+          - rsyslog_service_name in ansible_facts.services
+        fail_msg: "Rsyslog service '{{ rsyslog_service_name }}' not found on {{ inventory_hostname }}"
+        success_msg: "Rsyslog service found on {{ inventory_hostname }}"
+
+    - name: Restart rsyslog service (trigger handler)
+      ansible.builtin.systemd:
+        name: "{{ rsyslog_service_name }}"
+        state: restarted
+      notify:
+        - verify rsyslog is active
+
+  handlers:
+
+    - name: verify rsyslog is active
+      ansible.builtin.systemd:
+        name: "{{ rsyslog_service_name }}"
+        state: started
+        enabled: yes
