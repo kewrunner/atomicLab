@@ -1,7 +1,10 @@
 ---
 - name: Restart rsyslog across Linux lab environment
-  hosts: linux_servers
-  become: true
+  hosts: all
+  gather_facts: true
+
+  vars:
+    tmp_dir: /tmp
   gather_facts: yes
 
   vars:
