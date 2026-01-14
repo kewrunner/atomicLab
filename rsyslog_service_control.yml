@@ -4,10 +4,6 @@
   gather_facts: true
 
   vars:
-    tmp_dir: /tmp
-  gather_facts: yes
-
-  vars:
     rsyslog_service_name: "{{ 'syslog' if ansible_facts.os_family == 'Suse' else 'rsyslog' }}"
 
   tasks:
