@@ -1,0 +1,171 @@
+---
+- name: Hardware health check
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    hw_report_dir: /tmp/hardware_reports
+
+  tasks:
+    - name: Ensure report directory exists on control node
+      ansible.builtin.file:
+        path: "{{ hw_report_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+
+    - name: Check if smartctl exists
+      ansible.builtin.command: which smartctl
+      register: smartctl_check
+      changed_when: false
+      failed_when: false
+
+    - name: Check if sensors exists
+      ansible.builtin.command: which sensors
+      register: sensors_check
+      changed_when: false
+      failed_when: false
+
+    - name: Collect system product info
+      ansible.builtin.shell: |
+        echo "Vendor: $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || echo N/A)"
+        echo "Product: $(cat /sys/class/dmi/id/product_name 2>/dev/null || echo N/A)"
+        echo "Serial: $(cat /sys/class/dmi/id/product_serial 2>/dev/null || echo N/A)"
+        echo "BIOS: $(cat /sys/class/dmi/id/bios_version 2>/dev/null || echo N/A)"
+      register: system_info
+      changed_when: false
+      failed_when: false
+
+    - name: Collect CPU info
+      ansible.builtin.shell: |
+        echo "CPU Model: $(lscpu | awk -F: '/Model name/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')"
+        echo "Sockets: $(lscpu | awk -F: '/Socket\(s\)/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')"
+        echo "Cores per socket: $(lscpu | awk -F: '/Core\(s\) per socket/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')"
+        echo "Threads per core: $(lscpu | awk -F: '/Thread\(s\) per core/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')"
+        echo "CPU MHz: $(lscpu | awk -F: '/CPU MHz/ {gsub(/^[ \t]+/, "", $2); print $2; exit}')"
+      register: cpu_info
+      changed_when: false
+      failed_when: false
+
+    - name: Collect memory info
+      ansible.builtin.shell: |
+        free -h
+        echo
+        echo "Memory devices:"
+        dmidecode -t memory 2>/dev/null | egrep -i 'Size:|Speed:|Manufacturer:|Part Number:|Locator:' || true
+      register: memory_info
+      changed_when: false
+      failed_when: false
+
+    - name: Collect block device layout
+      ansible.builtin.command: lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL
+      register: lsblk_info
+      changed_when: false
+      failed_when: false
+
+    - name: Collect filesystem usage
+      ansible.builtin.command: df -hT
+      register: df_info
+      changed_when: false
+      failed_when: false
+
+    - name: Collect RAID status
+      ansible.builtin.command: cat /proc/mdstat
+      register: raid_info
+      changed_when: false
+      failed_when: false
+
+    - name: Collect temperature and sensor status
+      ansible.builtin.command: sensors
+      register: sensors_info
+      changed_when: false
+      failed_when: false
+      when: sensors_check.rc == 0
+
+    - name: Collect SMART health summary for disks
+      ansible.builtin.shell: |
+        for d in /dev/sd? /dev/nvme?n1; do
+          [ -b "$d" ] || continue
+          echo "===== $d ====="
+          smartctl -H "$d" 2>/dev/null || echo "SMART check unavailable for $d"
+          echo
+        done
+      register: smart_info
+      changed_when: false
+      failed_when: false
+      when: smartctl_check.rc == 0
+
+    - name: Collect recent hardware-related kernel messages
+      ansible.builtin.shell: |
+        dmesg -T 2>/dev/null | egrep -i 'error|fail|warn|critical|mce|ecc|edac|thermal|disk|smart|i/o error|hardware' | tail -50
+      register: dmesg_hw
+      changed_when: false
+      failed_when: false
+
+    - name: Build hardware report
+      ansible.builtin.copy:
+        dest: "{{ hw_report_dir }}/{{ inventory_hostname }}_hardware_status.txt"
+        mode: '0644'
+        content: |
+          ==================================================
+          Hardware Status Report for {{ inventory_hostname }}
+          ==================================================
+
+          Hostname: {{ ansible_hostname }}
+          FQDN: {{ ansible_fqdn }}
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          Kernel: {{ ansible_kernel }}
+          Architecture: {{ ansible_architecture }}
+          Date: {{ ansible_date_time.iso8601 }}
+
+          -------------------------------
+          System Information
+          -------------------------------
+          {{ system_info.stdout | default('N/A') }}
+
+          -------------------------------
+          CPU Information
+          -------------------------------
+          {{ cpu_info.stdout | default('N/A') }}
+
+          -------------------------------
+          Memory Information
+          -------------------------------
+          {{ memory_info.stdout | default('N/A') }}
+
+          -------------------------------
+          Block Devices
+          -------------------------------
+          {{ lsblk_info.stdout | default('N/A') }}
+
+          -------------------------------
+          Filesystem Usage
+          -------------------------------
+          {{ df_info.stdout | default('N/A') }}
+
+          -------------------------------
+          RAID Status
+          -------------------------------
+          {{ raid_info.stdout | default('N/A') }}
+
+          -------------------------------
+          Sensors / Temperature
+          -------------------------------
+          {{ sensors_info.stdout | default('sensors command not available') }}
+
+          -------------------------------
+          SMART Health
+          -------------------------------
+          {{ smart_info.stdout | default('smartctl command not available') }}
+
+          -------------------------------
+          Recent Hardware-Related Kernel Messages
+          -------------------------------
+          {{ dmesg_hw.stdout | default('N/A') }}
+      delegate_to: localhost
+
+    - name: Show report location
+      ansible.builtin.debug:
+        msg: "Hardware report saved to {{ hw_report_dir }}/{{ inventory_hostname }}_hardware_status.txt"
