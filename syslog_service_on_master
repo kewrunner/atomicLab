@@ -1,0 +1,54 @@
+---
+- name: Check syslog services on master server
+  hosts: lab-ubuntu24-aap-client-960-178
+  gather_facts: true
+  become: true
+
+  tasks:
+    - name: Check rsyslog service
+      ansible.builtin.systemd:
+        name: rsyslog
+      register: rsyslog_status
+      failed_when: false
+
+    - name: Check syslog-ng service
+      ansible.builtin.systemd:
+        name: syslog-ng
+      register: syslogng_status
+      failed_when: false
+
+    - name: Check syslog listener ports
+      ansible.builtin.shell: |
+        ss -tulpen | grep -E ':514|rsyslog|syslog' || true
+      register: syslog_ports
+      changed_when: false
+
+    - name: Check rsyslog config files
+      ansible.builtin.shell: |
+        ls -lah /etc/rsyslog.conf /etc/rsyslog.d/ 2>/dev/null || true
+        grep -RniE '^\s*[^#]' /etc/rsyslog.conf /etc/rsyslog.d/*.conf 2>/dev/null || true
+      register: rsyslog_config
+      changed_when: false
+
+    - name: Send local syslog test message
+      ansible.builtin.command: >
+        logger -p local0.info
+        "AWX syslog test from {{ inventory_hostname }} at {{ ansible_date_time.iso8601 }}"
+      changed_when: false
+
+    - name: Read latest syslog lines
+      ansible.builtin.shell: |
+        tail -n 30 /var/log/syslog 2>/dev/null || journalctl -n 30 --no-pager
+      register: syslog_tail
+      changed_when: false
+
+    - name: Show syslog service summary
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          os: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+          rsyslog_active: "{{ rsyslog_status.status.ActiveState | default('not_found') }}"
+          rsyslog_enabled: "{{ rsyslog_status.status.UnitFileState | default('unknown') }}"
+          syslogng_active: "{{ syslogng_status.status.ActiveState | default('not_found') }}"
+          syslog_ports: "{{ syslog_ports.stdout_lines }}"
+          recent_logs: "{{ syslog_tail.stdout_lines[-10:] }}"
