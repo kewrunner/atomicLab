@@ -1,0 +1,57 @@
+---
+- name: Validate SSH login by userID and FQDN
+  hosts: all
+  gather_facts: false
+
+  vars:
+    ssh_test_users:
+      - _aapautomate
+
+    ssh_connect_timeout: 8
+    ssh_report_file: "./ssh_login_report.csv"
+
+    ssh_common_opts: >-
+      -q
+      -o IdentitiesOnly=yes
+      -o PreferredAuthentications=password
+      -o PubkeyAuthentication=no
+      -o PasswordAuthentication=yes
+      -o ConnectTimeout={{ ssh_connect_timeout }}
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+
+  tasks:
+    - name: Initialize CSV report on controller
+      ansible.builtin.copy:
+        dest: "{{ ssh_report_file }}"
+        content: "userID,FQDN,ssh_status\n"
+        mode: "0644"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Test SSH password login and collect FQDN
+      ansible.builtin.shell: |
+        sshpass -e ssh {{ ssh_common_opts }} {{ item }}@{{ inventory_hostname }} "hostname -f 2>/dev/null || hostname"
+      environment:
+        SSHPASS: "{{ ansible_password }}"
+      loop: "{{ ssh_test_users }}"
+      register: ssh_login_results
+      changed_when: false
+      failed_when: false
+      delegate_to: localhost
+      no_log: true
+
+    - name: Append SSH login result to CSV report
+      ansible.builtin.lineinfile:
+        path: "{{ ssh_report_file }}"
+        line: "{{ item.item }},{{ item.stdout | trim if item.rc == 0 else inventory_hostname }},{{ 'PASS' if item.rc == 0 else 'FAIL' }}"
+        insertafter: EOF
+        create: true
+      loop: "{{ ssh_login_results.results }}"
+      delegate_to: localhost
+      throttle: 1
+
+    - name: Display SSH login results
+      ansible.builtin.debug:
+        msg: "{{ item.item }} | {{ item.stdout | trim if item.rc == 0 else inventory_hostname }} | {{ 'PASS' if item.rc == 0 else 'FAIL' }}"
+      loop: "{{ ssh_login_results.results }}"
