@@ -5,12 +5,12 @@
   gather_facts: true
 
   vars:
-    syslog_tag: "TEST01132026KATTIA"
-    syslog_message: "hello from {{ inventory_hostname }} via UDP"
+    syslog_tag: "Testing Syslog Message April 26, 2026."
+    syslog_message: "Hello from {{ inventory_hostname }} via UDP"
 
   tasks:
 
-    - name: Send test message with logger demo with Kattia
+    - name: Send test message with logger demo
       ansible.builtin.command: >
         logger -t {{ syslog_tag }} "{{ syslog_message }}"
       register: logger_output
