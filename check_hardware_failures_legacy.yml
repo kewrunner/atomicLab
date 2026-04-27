@@ -1,0 +1,177 @@
+---
+- name: Hardware health check and syslog summary
+  hosts: all
+  gather_facts: false
+  become: false
+  serial: 5
+
+  vars:
+    hw_report_dir: /tmp/hardware_reports
+
+  tasks:
+    - name: Ensure report directory exists on AWX control node
+      ansible.builtin.file:
+        path: "{{ hw_report_dir }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+      become: false
+
+    - name: Collect hardware status without remote Python dependency
+      ansible.builtin.raw: |
+        echo "=================================================="
+        echo "Hardware Status Report"
+        echo "=================================================="
+        echo
+        echo "Hostname: $(hostname -s 2>/dev/null || hostname)"
+        echo "FQDN: $(hostname -f 2>/dev/null || hostname)"
+        echo "Inventory Hostname: {{ inventory_hostname }}"
+        echo "Ansible Target IP: {{ ansible_host | default(inventory_hostname) }}"
+        echo "OS: $(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || uname -s)"
+        echo "Kernel: $(uname -r)"
+        echo "Architecture: $(uname -m)"
+        echo "Date: $(date -Iseconds 2>/dev/null || date)"
+        echo
+
+        echo "-------------------------------"
+        echo "System Information"
+        echo "-------------------------------"
+        echo "Vendor: $(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || echo N/A)"
+        echo "Product: $(cat /sys/class/dmi/id/product_name 2>/dev/null || echo N/A)"
+        echo "Serial: $(cat /sys/class/dmi/id/product_serial 2>/dev/null || echo N/A)"
+        echo "BIOS: $(cat /sys/class/dmi/id/bios_version 2>/dev/null || echo N/A)"
+        echo
+
+        echo "-------------------------------"
+        echo "CPU Information"
+        echo "-------------------------------"
+        if command -v lscpu >/dev/null 2>&1; then
+          lscpu
+        else
+          cat /proc/cpuinfo 2>/dev/null | head -80 || echo "CPU info unavailable"
+        fi
+        echo
+
+        echo "-------------------------------"
+        echo "Memory Information"
+        echo "-------------------------------"
+        free -h 2>/dev/null || cat /proc/meminfo 2>/dev/null || echo "Memory info unavailable"
+        echo
+
+        echo "Memory Devices:"
+        if command -v dmidecode >/dev/null 2>&1; then
+          dmidecode -t memory 2>/dev/null | egrep -i 'Size:|Speed:|Manufacturer:|Part Number:|Locator:' || true
+        else
+          echo "dmidecode not installed"
+        fi
+        echo
+
+        echo "-------------------------------"
+        echo "Block Devices"
+        echo "-------------------------------"
+        if command -v lsblk >/dev/null 2>&1; then
+          lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,MODEL,SERIAL 2>/dev/null || lsblk
+        else
+          echo "lsblk not available"
+        fi
+        echo
+
+        echo "-------------------------------"
+        echo "Filesystem Usage"
+        echo "-------------------------------"
+        df -hT 2>/dev/null || df -h
+        echo
+
+        echo "-------------------------------"
+        echo "RAID Status"
+        echo "-------------------------------"
+        cat /proc/mdstat 2>/dev/null || echo "/proc/mdstat unavailable"
+        echo
+
+        echo "-------------------------------"
+        echo "Sensors / Temperature"
+        echo "-------------------------------"
+        if command -v sensors >/dev/null 2>&1; then
+          sensors 2>/dev/null || echo "sensors command failed"
+        else
+          echo "sensors command not installed"
+        fi
+        echo
+
+        echo "-------------------------------"
+        echo "SMART Health"
+        echo "-------------------------------"
+        if command -v smartctl >/dev/null 2>&1; then
+          for d in /dev/sd? /dev/nvme?n1; do
+            [ -b "$d" ] || continue
+            echo "===== $d ====="
+            smartctl -H "$d" 2>/dev/null || echo "SMART check unavailable for $d"
+            echo
+          done
+        else
+          echo "smartctl command not installed"
+        fi
+        echo
+
+        echo "-------------------------------"
+        echo "Recent Hardware-Related Kernel Messages"
+        echo "-------------------------------"
+        dmesg -T 2>/dev/null | egrep -i 'error|fail|warn|critical|mce|ecc|edac|thermal|disk|smart|i/o error|hardware' | tail -50 || true
+      register: hardware_raw
+      changed_when: false
+      failed_when: false
+
+    - name: Send hardware health summary to local syslog
+      ansible.builtin.raw: |
+        logger -p local0.info -t awx-hardware-check \
+          "host={{ inventory_hostname }} \
+          ansible_host={{ ansible_host | default(inventory_hostname) }} \
+          os='$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || uname -s)' \
+          kernel='$(uname -r)' \
+          arch='$(uname -m)' \
+          vendor='$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || echo N/A)' \
+          product='$(cat /sys/class/dmi/id/product_name 2>/dev/null || echo N/A)' \
+          serial='$(cat /sys/class/dmi/id/product_serial 2>/dev/null || echo N/A)' \
+          root_usage='$(df -h / 2>/dev/null | awk 'NR==2{print $5}' || echo N/A)' \
+          disks='$(lsblk -dn -o NAME,SIZE,TYPE 2>/dev/null | awk '$3=="disk"{print $1":"$2}' | paste -sd "," -)'"
+      register: syslog_result
+      changed_when: false
+      failed_when: false
+
+    - name: Build hardware report on AWX control node
+      ansible.builtin.copy:
+        dest: "{{ hw_report_dir }}/{{ inventory_hostname }}_hardware_status.txt"
+        mode: '0644'
+        content: |
+          ==================================================
+          Hardware Status Report for {{ inventory_hostname }}
+          ==================================================
+
+          Target IP:
+          {{ ansible_host | default(inventory_hostname) }}
+
+          Syslog Send Result:
+          rc={{ syslog_result.rc | default('N/A') }}
+          stdout={{ syslog_result.stdout | default('') }}
+          stderr={{ syslog_result.stderr | default('') }}
+
+          ==================================================
+          Hardware Collection Output
+          ==================================================
+
+          {{ hardware_raw.stdout | default('No hardware output collected') }}
+
+          {% if hardware_raw.stderr is defined and hardware_raw.stderr | length > 0 %}
+          ==================================================
+          Hardware Collection STDERR
+          ==================================================
+
+          {{ hardware_raw.stderr }}
+          {% endif %}
+      delegate_to: localhost
+      become: false
+
+    - name: Show report location
+      ansible.builtin.debug:
+        msg: "Hardware report saved to {{ hw_report_dir }}/{{ inventory_hostname }}_hardware_status.txt"
