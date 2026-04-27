@@ -31,7 +31,7 @@
 
     - name: Test SSH password login and collect FQDN
       ansible.builtin.shell: |
-        sshpass -e ssh {{ ssh_common_opts }} {{ item }}@{{ inventory_hostname }} "hostname -f 2>/dev/null || hostname"
+        sshpass -e ssh {{ ssh_common_opts }} {{ item }}@{{ ansible_host | default(inventory_hostname) }} "hostname -f 2>/dev/null || hostname"
       environment:
         SSHPASS: "{{ ansible_password }}"
       loop: "{{ ssh_test_users }}"
