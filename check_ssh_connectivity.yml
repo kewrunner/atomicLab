@@ -8,7 +8,7 @@
       - _aapautomate
 
     ssh_connect_timeout: 8
-    ssh_report_file: "./ssh_login_report.csv"
+    ssh_report_file: "/tmp/ssh_login_report.csv"
 
     ssh_common_opts: >-
       -q
