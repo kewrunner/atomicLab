@@ -1,7 +1,6 @@
 ---
 - name: Hardware health check
   hosts: all
-  become: true
   gather_facts: true
 
   vars:
