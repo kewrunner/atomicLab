@@ -118,12 +118,12 @@
           {{ syslog_forward_rule }}
       when: inventory_hostname != log_server_inventory_name
 
-    - name: Check rsyslog status on client
-      ansible.builtin.command: systemctl is-active "{{ syslog_service_name }}"
-      register: client_rsyslog_status_before
-      changed_when: false
-      failed_when: false
-      when: inventory_hostname != log_server_inventory_name
+    # - name: Check rsyslog status on client
+    #   ansible.builtin.command: systemctl is-active "{{ syslog_service_name }}"
+    #   register: client_rsyslog_status_before
+    #   changed_when: false
+    #   failed_when: false
+    #   when: inventory_hostname != log_server_inventory_name
 
     - name: Restart rsyslog on client if already running
       ansible.builtin.service:
