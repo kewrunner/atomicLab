@@ -1,0 +1,225 @@
+---
+# Configure Linux syslog forwarding to central log server
+# Verify shipping from the perspective of the log server
+#
+# Log server: 192.168.1.178
+# Default syslog service: rsyslog
+
+- name: Configure central syslog receiver
+  hosts: 192.168.1.178
+  gather_facts: true
+  become: true
+
+  vars:
+    syslog_service_name: rsyslog
+    syslog_server_port: 514
+    syslog_remote_dir: /var/log/remote
+    syslog_receiver_conf: /etc/rsyslog.d/10-remote-receiver.conf
+
+  tasks:
+    - name: Ensure rsyslog is installed on log server
+      ansible.builtin.package:
+        name: rsyslog
+        state: present
+
+    - name: Ensure remote log directory exists on log server
+      ansible.builtin.file:
+        path: "{{ syslog_remote_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Configure rsyslog receiver on log server
+      ansible.builtin.copy:
+        dest: "{{ syslog_receiver_conf }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible
+          # Receive remote syslog over TCP and UDP 514
+
+          module(load="imtcp")
+          input(type="imtcp" port="{{ syslog_server_port }}")
+
+          module(load="imudp")
+          input(type="imudp" port="{{ syslog_server_port }}")
+
+          template(name="RemotePerHost" type="string" string="{{ syslog_remote_dir }}/%FROMHOST-IP%.log")
+
+          if ($fromhost-ip != "127.0.0.1") then {
+              action(type="omfile" dynaFile="RemotePerHost")
+              stop
+          }
+      notify: Restart rsyslog on log server
+
+    - name: Check rsyslog status on log server
+      ansible.builtin.command: systemctl is-active "{{ syslog_service_name }}"
+      register: log_server_rsyslog_status
+      changed_when: false
+      failed_when: false
+
+    - name: Restart rsyslog on log server if already running
+      ansible.builtin.service:
+        name: "{{ syslog_service_name }}"
+        state: restarted
+        enabled: true
+      when: log_server_rsyslog_status.rc == 0
+
+    - name: Start rsyslog on log server if not running
+      ansible.builtin.service:
+        name: "{{ syslog_service_name }}"
+        state: started
+        enabled: true
+      when: log_server_rsyslog_status.rc != 0
+
+  handlers:
+    - name: Restart rsyslog on log server
+      ansible.builtin.service:
+        name: "{{ syslog_service_name }}"
+        state: restarted
+        enabled: true
+
+
+- name: Configure syslog forwarding on Linux clients
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars:
+    log_server_ip: "192.168.1.178"
+    log_server_inventory_name: "192.168.1.178"
+
+    syslog_service_name: rsyslog
+    syslog_server_port: 514
+    syslog_client_conf: /etc/rsyslog.d/90-forward-to-central-logserver.conf
+    syslog_report_file: "/tmp/syslog_shipping_report.csv"
+
+    # Use TCP forwarding.
+    # Single @  = UDP
+    # Double @@ = TCP
+    syslog_forward_rule: "*.* @@{{ log_server_ip }}:{{ syslog_server_port }}"
+
+  tasks:
+    - name: Skip direct client configuration on the log server itself
+      ansible.builtin.debug:
+        msg: "Skipping client forwarding configuration on log server {{ inventory_hostname }}"
+      when: inventory_hostname == log_server_inventory_name or ansible_host | default(inventory_hostname) == log_server_ip
+
+    - name: Ensure rsyslog is installed on client
+      ansible.builtin.package:
+        name: rsyslog
+        state: present
+      when: inventory_hostname != log_server_inventory_name and ansible_host | default(inventory_hostname) != log_server_ip
+
+    - name: Configure client rsyslog forwarding to central log server
+      ansible.builtin.copy:
+        dest: "{{ syslog_client_conf }}"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by Ansible
+          # Forward all syslog messages to central log server
+          {{ syslog_forward_rule }}
+      when: inventory_hostname != log_server_inventory_name and ansible_host | default(inventory_hostname) != log_server_ip
+
+    - name: Check rsyslog status on client
+      ansible.builtin.command: systemctl is-active "{{ syslog_service_name }}"
+      register: client_rsyslog_status_before
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname != log_server_inventory_name and ansible_host | default(inventory_hostname) != log_server_ip
+
+    - name: Restart rsyslog on client if already running
+      ansible.builtin.service:
+        name: "{{ syslog_service_name }}"
+        state: restarted
+        enabled: true
+      when:
+        - inventory_hostname != log_server_inventory_name
+        - ansible_host | default(inventory_hostname) != log_server_ip
+        - client_rsyslog_status_before.rc == 0
+
+    - name: Start rsyslog on client if not running
+      ansible.builtin.service:
+        name: "{{ syslog_service_name }}"
+        state: started
+        enabled: true
+      when:
+        - inventory_hostname != log_server_inventory_name
+        - ansible_host | default(inventory_hostname) != log_server_ip
+        - client_rsyslog_status_before.rc != 0
+
+    - name: Check rsyslog status after start or restart
+      ansible.builtin.command: systemctl is-active "{{ syslog_service_name }}"
+      register: client_rsyslog_status_after
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname != log_server_inventory_name and ansible_host | default(inventory_hostname) != log_server_ip
+
+    - name: Build unique syslog test marker
+      ansible.builtin.set_fact:
+        syslog_test_marker: "ANSIBLE_SYSLOG_TEST {{ inventory_hostname }} {{ ansible_date_time.iso8601_basic_short }}"
+      when: inventory_hostname != log_server_inventory_name and ansible_host | default(inventory_hostname) != log_server_ip
+
+    - name: Send syslog test marker from client
+      ansible.builtin.command: logger -t ansible_syslog_validation "{{ syslog_test_marker }}"
+      changed_when: false
+      when: inventory_hostname != log_server_inventory_name and ansible_host | default(inventory_hostname) != log_server_ip
+
+    - name: Pause briefly for log forwarding
+      ansible.builtin.pause:
+        seconds: 5
+      when: inventory_hostname != log_server_inventory_name and ansible_host | default(inventory_hostname) != log_server_ip
+
+    - name: Verify test marker arrived on log server
+      ansible.builtin.shell: |
+        set -o pipefail
+        grep -R "{{ syslog_test_marker }}" /var/log/remote /var/log/messages /var/log/syslog 2>/dev/null | tail -1
+      args:
+        executable: /bin/bash
+      register: log_server_validation
+      changed_when: false
+      failed_when: false
+      delegate_to: "{{ log_server_inventory_name }}"
+      become: true
+      when: inventory_hostname != log_server_inventory_name and ansible_host | default(inventory_hostname) != log_server_ip
+
+    - name: Set syslog shipping report facts
+      ansible.builtin.set_fact:
+        syslog_report_user_host: "{{ inventory_hostname }}"
+        syslog_report_fqdn: "{{ ansible_facts['fqdn'] | default(inventory_hostname) }}"
+        syslog_report_ip: "{{ ansible_facts['default_ipv4']['address'] | default(ansible_host | default(inventory_hostname)) }}"
+        syslog_report_service_status: "{{ client_rsyslog_status_after.stdout | default('skipped') }}"
+        syslog_report_shipping_status: "{{ 'PASS' if log_server_validation.rc | default(1) == 0 else 'FAIL' }}"
+        syslog_report_log_server_evidence: "{{ log_server_validation.stdout | default('no log marker found on log server') | trim }}"
+      when: inventory_hostname != log_server_inventory_name and ansible_host | default(inventory_hostname) != log_server_ip
+
+
+- name: Generate consolidated syslog report on controller
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    syslog_report_file: "/tmp/syslog_shipping_report.csv"
+    log_server_inventory_name: "192.168.1.178"
+    log_server_ip: "192.168.1.178"
+
+  tasks:
+    - name: Write consolidated syslog shipping report
+      ansible.builtin.copy:
+        dest: "{{ syslog_report_file }}"
+        mode: "0644"
+        content: |
+          fqdn,hostname,ip,service_status,shipping_status,log_server_evidence
+          {% for host in groups['all'] %}
+          {% if host != log_server_inventory_name and hostvars[host].ansible_host | default(host) != log_server_ip %}
+          {{ hostvars[host].syslog_report_fqdn | default(host) }},{{ host }},{{ hostvars[host].syslog_report_ip | default('unknown') }},{{ hostvars[host].syslog_report_service_status | default('unknown') }},{{ hostvars[host].syslog_report_shipping_status | default('FAIL') }},"{{ hostvars[host].syslog_report_log_server_evidence | default('no evidence collected') | replace('"', '""') }}"
+          {% endif %}
+          {% endfor %}
+
+    - name: Display report location
+      ansible.builtin.debug:
+        msg: "Syslog shipping report generated: {{ syslog_report_file }}"
