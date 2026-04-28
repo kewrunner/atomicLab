@@ -1,0 +1,80 @@
+---
+- name: Ensure _aapautomate account is active and has sudo access
+  hosts: all
+  gather_facts: false
+  become: true
+
+  vars:
+    target_user: "_aapautomate"
+    sudoers_file: "/etc/sudoers.d/99-aapautomate"
+
+  tasks:
+    - name: Check if target user exists
+      ansible.builtin.command: "id {{ target_user }}"
+      register: target_user_check
+      changed_when: false
+      failed_when: false
+
+    - name: Fail if target user does not exist
+      ansible.builtin.fail:
+        msg: "User {{ target_user }} does not exist on {{ inventory_hostname }}"
+      when: target_user_check.rc != 0
+
+    - name: Show current account aging before changes
+      ansible.builtin.command: "chage -l {{ target_user }}"
+      register: chage_before
+      changed_when: false
+
+    - name: Display current account aging before changes
+      ansible.builtin.debug:
+        msg: "{{ chage_before.stdout_lines }}"
+
+    - name: Set account expiration to never
+      ansible.builtin.command: "chage -E -1 {{ target_user }}"
+      register: chage_expire_never
+      changed_when: chage_expire_never.rc == 0
+
+    - name: Unlock target user account
+      ansible.builtin.command: "passwd -u {{ target_user }}"
+      register: passwd_unlock
+      changed_when: "'password expiry information changed' in passwd_unlock.stdout or passwd_unlock.rc == 0"
+      failed_when: false
+
+    - name: Check current password/account status
+      ansible.builtin.command: "passwd -S {{ target_user }}"
+      register: passwd_status
+      changed_when: false
+      failed_when: false
+
+    - name: Ensure sudoers drop-in allows target user to become root
+      ansible.builtin.copy:
+        dest: "{{ sudoers_file }}"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "/usr/sbin/visudo -cf %s"
+        content: |
+          # Managed by Ansible
+          # Allow {{ target_user }} to run commands as root
+          {{ target_user }} ALL=(ALL) ALL
+
+    - name: Verify sudoers file exists
+      ansible.builtin.stat:
+        path: "{{ sudoers_file }}"
+      register: sudoers_file_check
+
+    - name: Show account aging after changes
+      ansible.builtin.command: "chage -l {{ target_user }}"
+      register: chage_after
+      changed_when: false
+
+    - name: Display final account and sudo status
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "User: {{ target_user }}"
+          - "passwd_status: {{ passwd_status.stdout | default('unknown') }}"
+          - "sudoers_file: {{ sudoers_file }}"
+          - "sudoers_file_exists: {{ sudoers_file_check.stat.exists }}"
+          - "account_aging:"
+          - "{{ chage_after.stdout_lines }}"
