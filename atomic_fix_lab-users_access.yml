@@ -13,8 +13,6 @@
 
     lab_password: "W3lc0m32026!"
 
-    sshd_main_config: /etc/ssh/sshd_config
-
   pre_tasks:
     - name: Confirm become is actually root
       ansible.builtin.raw: id -u
@@ -75,9 +73,11 @@
         chmod 0750 /etc/sudoers.d || true
 
         cat > /etc/sudoers.d/90-atomiclab-aap-users <<'EOF'
-_aapautomate ALL=(ALL) NOPASSWD: ALL
-freddygonzalez ALL=(ALL) NOPASSWD: ALL
-EOF
+        _aapautomate ALL=(ALL) NOPASSWD: ALL
+        freddygonzalez ALL=(ALL) NOPASSWD: ALL
+        EOF
+
+        sed -i 's/^[[:space:]]*//' /etc/sudoers.d/90-atomiclab-aap-users
 
         chmod 0440 /etc/sudoers.d/90-atomiclab-aap-users
 
@@ -90,42 +90,44 @@ EOF
       ansible.builtin.raw: |
         set -e
 
-        cp -p {{ sshd_main_config }} {{ sshd_main_config }}.bak.$(date +%F-%H%M%S)
+        SSHD_MAIN_CONFIG="/etc/ssh/sshd_config"
 
-        if grep -qE '^[#[:space:]]*PasswordAuthentication' {{ sshd_main_config }}; then
-          sed -i 's/^[#[:space:]]*PasswordAuthentication.*/PasswordAuthentication yes/' {{ sshd_main_config }}
+        cp -p "$SSHD_MAIN_CONFIG" "$SSHD_MAIN_CONFIG.bak.$(date +%F-%H%M%S)"
+
+        if grep -qE '^[#[:space:]]*PasswordAuthentication' "$SSHD_MAIN_CONFIG"; then
+          sed -i 's/^[#[:space:]]*PasswordAuthentication.*/PasswordAuthentication yes/' "$SSHD_MAIN_CONFIG"
         else
-          echo 'PasswordAuthentication yes' >> {{ sshd_main_config }}
+          echo 'PasswordAuthentication yes' >> "$SSHD_MAIN_CONFIG"
         fi
 
-        if grep -qE '^[#[:space:]]*PubkeyAuthentication' {{ sshd_main_config }}; then
-          sed -i 's/^[#[:space:]]*PubkeyAuthentication.*/PubkeyAuthentication yes/' {{ sshd_main_config }}
+        if grep -qE '^[#[:space:]]*PubkeyAuthentication' "$SSHD_MAIN_CONFIG"; then
+          sed -i 's/^[#[:space:]]*PubkeyAuthentication.*/PubkeyAuthentication yes/' "$SSHD_MAIN_CONFIG"
         else
-          echo 'PubkeyAuthentication yes' >> {{ sshd_main_config }}
+          echo 'PubkeyAuthentication yes' >> "$SSHD_MAIN_CONFIG"
         fi
 
-        if grep -qE '^[#[:space:]]*KbdInteractiveAuthentication' {{ sshd_main_config }}; then
-          sed -i 's/^[#[:space:]]*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/' {{ sshd_main_config }}
+        if grep -qE '^[#[:space:]]*KbdInteractiveAuthentication' "$SSHD_MAIN_CONFIG"; then
+          sed -i 's/^[#[:space:]]*KbdInteractiveAuthentication.*/KbdInteractiveAuthentication yes/' "$SSHD_MAIN_CONFIG"
         else
-          echo 'KbdInteractiveAuthentication yes' >> {{ sshd_main_config }}
+          echo 'KbdInteractiveAuthentication yes' >> "$SSHD_MAIN_CONFIG"
         fi
 
-        if grep -qE '^[#[:space:]]*ChallengeResponseAuthentication' {{ sshd_main_config }}; then
-          sed -i 's/^[#[:space:]]*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' {{ sshd_main_config }}
+        if grep -qE '^[#[:space:]]*ChallengeResponseAuthentication' "$SSHD_MAIN_CONFIG"; then
+          sed -i 's/^[#[:space:]]*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' "$SSHD_MAIN_CONFIG"
         else
-          echo 'ChallengeResponseAuthentication yes' >> {{ sshd_main_config }}
+          echo 'ChallengeResponseAuthentication yes' >> "$SSHD_MAIN_CONFIG"
         fi
 
-        if grep -qE '^[#[:space:]]*UsePAM' {{ sshd_main_config }}; then
-          sed -i 's/^[#[:space:]]*UsePAM.*/UsePAM yes/' {{ sshd_main_config }}
+        if grep -qE '^[#[:space:]]*UsePAM' "$SSHD_MAIN_CONFIG"; then
+          sed -i 's/^[#[:space:]]*UsePAM.*/UsePAM yes/' "$SSHD_MAIN_CONFIG"
         else
-          echo 'UsePAM yes' >> {{ sshd_main_config }}
+          echo 'UsePAM yes' >> "$SSHD_MAIN_CONFIG"
         fi
 
-        if grep -qE '^[#[:space:]]*MaxAuthTries' {{ sshd_main_config }}; then
-          sed -i 's/^[#[:space:]]*MaxAuthTries.*/MaxAuthTries 10/' {{ sshd_main_config }}
+        if grep -qE '^[#[:space:]]*MaxAuthTries' "$SSHD_MAIN_CONFIG"; then
+          sed -i 's/^[#[:space:]]*MaxAuthTries.*/MaxAuthTries 10/' "$SSHD_MAIN_CONFIG"
         else
-          echo 'MaxAuthTries 10' >> {{ sshd_main_config }}
+          echo 'MaxAuthTries 10' >> "$SSHD_MAIN_CONFIG"
         fi
 
         sshd -t
