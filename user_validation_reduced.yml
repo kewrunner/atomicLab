@@ -1,0 +1,41 @@
+---
+- name: Enable passwordless sudo for Atomic Lab users
+  hosts: all
+  gather_facts: false
+  become: true
+  become_user: root
+  ignore_unreachable: true
+
+  tasks:
+    - name: Confirm root escalation
+      ansible.builtin.raw: id -u
+      register: root_check
+      changed_when: false
+      failed_when: root_check.stdout | trim != "0"
+
+    - name: Configure sudoers for passwordless automation access
+      ansible.builtin.raw: |
+        set -e
+
+        mkdir -p /etc/sudoers.d
+
+        cat > /etc/sudoers.d/90-atomiclab-aap-users <<'EOF'
+        _aapautomate ALL=(ALL) NOPASSWD: ALL
+        freddygonzalez ALL=(ALL) NOPASSWD: ALL
+        EOF
+
+        sed -i 's/^[[:space:]]*//' /etc/sudoers.d/90-atomiclab-aap-users
+        chmod 0440 /etc/sudoers.d/90-atomiclab-aap-users
+
+        visudo -cf /etc/sudoers.d/90-atomiclab-aap-users
+
+    - name: Validate passwordless sudo now works
+      ansible.builtin.raw: sudo -n whoami
+      become: false
+      register: sudo_check
+      changed_when: false
+      failed_when: sudo_check.stdout | trim != "root"
+
+    - name: Show result
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} passwordless sudo is working"
