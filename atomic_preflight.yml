@@ -1,0 +1,34 @@
+---
+- name: Atomic Lab access preflight
+  hosts: all
+  gather_facts: false
+  become: false
+
+  tasks:
+    - name: Confirm SSH login identity
+      ansible.builtin.command: whoami
+      register: whoami_result
+      changed_when: false
+
+    - name: Show SSH login identity
+      ansible.builtin.debug:
+        msg: "Connected as {{ whoami_result.stdout }}"
+
+    - name: Confirm sudo works
+      ansible.builtin.command: whoami
+      become: true
+      register: sudo_whoami_result
+      changed_when: false
+
+    - name: Show sudo identity
+      ansible.builtin.debug:
+        msg: "Become user is {{ sudo_whoami_result.stdout }}"
+
+    - name: Gather minimal facts after sudo check
+      ansible.builtin.setup:
+        gather_subset:
+          - min
+
+    - name: Show OS summary
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} | {{ ansible_distribution }} {{ ansible_distribution_version }} | pkg_mgr={{ ansible_pkg_mgr | default('unknown') }}"
