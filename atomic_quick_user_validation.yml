@@ -1,0 +1,21 @@
+---
+- name: Validate sudo access correctly
+  hosts: all
+  gather_facts: false
+  ignore_unreachable: true
+
+  tasks:
+    - name: Confirm login user
+      ansible.builtin.raw: whoami
+      register: login_user
+      changed_when: false
+
+    - name: Confirm sudo to root works
+      ansible.builtin.raw: sudo -n whoami
+      register: sudo_user
+      changed_when: false
+      failed_when: sudo_user.stdout | trim != "root"
+
+    - name: Show result
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }} login={{ login_user.stdout | trim }} sudo={{ sudo_user.stdout | trim }}"
