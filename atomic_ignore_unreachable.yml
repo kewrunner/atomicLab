@@ -1,0 +1,48 @@
+---
+- name: Configure syslog forwarding on Linux clients
+  hosts: syslog_clients
+  gather_facts: true
+  become: true
+  serial: 5
+  ignore_unreachable: true
+
+  vars:
+    syslog_server_ip: "192.168.1.178"
+
+  tasks:
+    - name: Ensure rsyslog is installed
+      ansible.builtin.package:
+        name: rsyslog
+        state: present
+
+    - name: Ensure rsyslog directory exists
+      ansible.builtin.file:
+        path: /etc/rsyslog.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Configure forwarding to central syslog receiver
+      ansible.builtin.copy:
+        dest: /etc/rsyslog.d/90-forward-to-central.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          # Managed by Ansible
+          *.* @@{{ syslog_server_ip }}:514
+
+      notify: Restart rsyslog
+
+    - name: Ensure rsyslog is enabled and running
+      ansible.builtin.service:
+        name: rsyslog
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Restart rsyslog
+      ansible.builtin.service:
+        name: rsyslog
+        state: restarted
