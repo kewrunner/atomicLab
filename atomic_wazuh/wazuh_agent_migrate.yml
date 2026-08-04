@@ -631,7 +631,7 @@
           The Wazuh manager is configured as {{ wazuh_manager }}.
 
     # =========================================================================
-    # 12. Decide whether re-enrollment is required
+    # 12. Decide whether re-enrollment is required - verify
     # =========================================================================
 
     - name: Determine whether Wazuh re-enrollment is required
