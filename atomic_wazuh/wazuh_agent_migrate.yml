@@ -1,0 +1,1012 @@
+---
+# =============================================================================
+# Wazuh Agent Fleet Migration and Upgrade
+#
+# Purpose:
+#   - Support RHEL, CentOS, Rocky, AlmaLinux, Oracle Linux, Ubuntu, Debian,
+#     SLES, and openSUSE.
+#   - Install or upgrade the Wazuh agent.
+#   - Back up the existing configuration and client key.
+#   - Determine whether the existing registration belongs to the target manager.
+#   - Preserve valid target-manager registrations on subsequent runs.
+#   - Re-enroll agents currently associated with another manager.
+#   - Enable, start, and validate the Wazuh agent service.
+#
+# Authentication:
+#   Store ansible_password and ansible_become_password in Ansible Vault.
+#   Do not place login passwords in this playbook or inventory.ini.
+#
+# Canary execution:
+#
+#   ansible-playbook \
+#     -i inventory.ini \
+#     wazuh_agent_migrate.yml \
+#     --ask-vault-pass \
+#     --limit lab-rhel9-aap-client-944-224
+#
+# Full fleet:
+#
+#   ansible-playbook \
+#     -i inventory.ini \
+#     wazuh_agent_migrate.yml \
+#     --ask-vault-pass
+# =============================================================================
+
+- name: Upgrade and migrate Wazuh agents to the new manager
+  hosts: wazuh_agents
+  become: true
+  gather_facts: true
+
+  # Limit the blast radius during fleet migration.
+  serial: 10
+
+  vars:
+    # =========================================================================
+    # Wazuh target configuration
+    # =========================================================================
+
+    wazuh_manager: "64.182.20.92"
+    wazuh_registration_server: "64.182.20.92"
+
+    wazuh_manager_port: 1514
+    wazuh_registration_port: 1515
+    wazuh_protocol: "tcp"
+
+    wazuh_agent_version: "4.14.7"
+    wazuh_agent_release: "1"
+    wazuh_agent_group: "default"
+
+    # Override in inventory or host_vars when necessary.
+    wazuh_agent_name: "{{ inventory_hostname }}"
+
+    # Leave blank when the Wazuh enrollment service does not require one.
+    # Store the value in Ansible Vault when required.
+    wazuh_registration_password: ""
+
+    # Force removal of the local client key and re-enrollment.
+    # Keep false during normal fleet runs.
+    wazuh_force_reenrollment: false
+
+    # Existing registrations targeting the new manager are preserved.
+    wazuh_preserve_target_registration: true
+
+    # Upgrade/install the agent package.
+    wazuh_upgrade_agent: true
+
+    # Remove downloaded RPM/DEB after successful execution.
+    wazuh_remove_downloaded_package: true
+
+    # Seconds allowed for a live TCP connection to appear after service start.
+    wazuh_connection_timeout: 60
+
+    # =========================================================================
+    # Wazuh local paths
+    # =========================================================================
+
+    wazuh_install_dir: "/var/ossec"
+    wazuh_config_file: "/var/ossec/etc/ossec.conf"
+    wazuh_client_keys_file: "/var/ossec/etc/client.keys"
+    wazuh_agent_auth_binary: "/var/ossec/bin/agent-auth"
+    wazuh_control_binary: "/var/ossec/bin/wazuh-control"
+    wazuh_log_file: "/var/ossec/logs/ossec.log"
+    wazuh_service_name: "wazuh-agent"
+
+    # =========================================================================
+    # Package sources
+    # =========================================================================
+
+    wazuh_package_base_url: "https://packages.wazuh.com/4.x"
+    wazuh_signing_key_url: "https://packages.wazuh.com/key/GPG-KEY-WAZUH"
+
+    wazuh_rpm_filename: >-
+      wazuh-agent-{{ wazuh_agent_version }}-{{ wazuh_agent_release }}.x86_64.rpm
+
+    wazuh_deb_filename: >-
+      wazuh-agent_{{ wazuh_agent_version }}-{{ wazuh_agent_release }}_amd64.deb
+
+    wazuh_rpm_url: >-
+      {{ wazuh_package_base_url }}/yum/{{ wazuh_rpm_filename }}
+
+    wazuh_deb_url: >-
+      {{ wazuh_package_base_url }}/apt/pool/main/w/wazuh-agent/{{ wazuh_deb_filename }}
+
+    wazuh_download_directory: "/var/tmp/wazuh-agent-migration"
+    wazuh_backup_root: "/var/backups/wazuh-agent"
+
+  pre_tasks:
+    # =========================================================================
+    # 1. Validate target system
+    # =========================================================================
+
+    - name: Display migration target
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Connection address: {{ ansible_host | default(inventory_hostname) }}"
+          - "OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Family: {{ ansible_os_family }}"
+          - "Architecture: {{ ansible_architecture }}"
+          - "Target manager: {{ wazuh_manager }}"
+          - "Agent name: {{ wazuh_agent_name }}"
+          - "Agent group: {{ wazuh_agent_group }}"
+          - "Target package: {{ wazuh_agent_version }}-{{ wazuh_agent_release }}"
+
+    - name: Validate supported operating system family
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family in ['RedHat', 'Debian', 'Suse']
+        fail_msg: >-
+          Unsupported operating system family {{ ansible_os_family }} on
+          {{ inventory_hostname }}. Supported families are RedHat, Debian,
+          and Suse.
+        success_msg: >-
+          Supported operating system family detected:
+          {{ ansible_os_family }}.
+
+    - name: Validate supported processor architecture
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture in ['x86_64', 'amd64']
+        fail_msg: >-
+          Unsupported architecture {{ ansible_architecture }} on
+          {{ inventory_hostname }}. This playbook currently deploys the
+          x86_64/amd64 Wazuh package.
+        success_msg: >-
+          Supported architecture detected: {{ ansible_architecture }}.
+
+    - name: Validate required Wazuh variables
+      ansible.builtin.assert:
+        that:
+          - wazuh_manager | length > 0
+          - wazuh_registration_server | length > 0
+          - wazuh_agent_name | length > 0
+          - wazuh_agent_group | length > 0
+          - wazuh_agent_version | length > 0
+          - wazuh_manager_port | int > 0
+          - wazuh_registration_port | int > 0
+        fail_msg: >-
+          One or more required Wazuh migration variables are missing or invalid.
+
+    # =========================================================================
+    # 2. Validate network connectivity from each endpoint
+    # =========================================================================
+
+    - name: Test Wazuh agent communication port
+      ansible.builtin.wait_for:
+        host: "{{ wazuh_manager }}"
+        port: "{{ wazuh_manager_port }}"
+        state: started
+        connect_timeout: 5
+        timeout: 15
+        msg: >-
+          Unable to connect from {{ inventory_hostname }} to
+          {{ wazuh_manager }}:{{ wazuh_manager_port }}.
+      when: wazuh_protocol == "tcp"
+
+    - name: Test Wazuh enrollment port
+      ansible.builtin.wait_for:
+        host: "{{ wazuh_registration_server }}"
+        port: "{{ wazuh_registration_port }}"
+        state: started
+        connect_timeout: 5
+        timeout: 15
+        msg: >-
+          Unable to connect from {{ inventory_hostname }} to
+          {{ wazuh_registration_server }}:{{ wazuh_registration_port }}.
+
+    # =========================================================================
+    # 3. Detect the existing Wazuh installation
+    # =========================================================================
+
+    - name: Check whether Wazuh configuration exists
+      ansible.builtin.stat:
+        path: "{{ wazuh_config_file }}"
+      register: wazuh_config_before_stat
+
+    - name: Check whether Wazuh client key exists
+      ansible.builtin.stat:
+        path: "{{ wazuh_client_keys_file }}"
+      register: wazuh_client_key_before_stat
+
+    - name: Query installed Wazuh RPM package
+      ansible.builtin.command:
+        argv:
+          - rpm
+          - -q
+          - wazuh-agent
+      register: wazuh_rpm_query
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family in ['RedHat', 'Suse']
+
+    - name: Query installed Wazuh Debian package
+      ansible.builtin.command:
+        argv:
+          - dpkg-query
+          - -W
+          - "-f=${Status} ${Version}"
+          - wazuh-agent
+      register: wazuh_deb_query
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == 'Debian'
+
+    - name: Record whether Wazuh is already installed
+      ansible.builtin.set_fact:
+        wazuh_agent_installed_before: >-
+          {{
+            (
+              ansible_os_family in ['RedHat', 'Suse']
+              and
+              (wazuh_rpm_query.rc | default(1) | int == 0)
+            )
+            or
+            (
+              ansible_os_family == 'Debian'
+              and
+              (wazuh_deb_query.rc | default(1) | int == 0)
+            )
+          }}
+
+    # =========================================================================
+    # 4. Read the original configuration before changing it
+    # =========================================================================
+
+    - name: Read original Wazuh configuration
+      ansible.builtin.slurp:
+        src: "{{ wazuh_config_file }}"
+      register: wazuh_original_config
+      when: wazuh_config_before_stat.stat.exists
+
+    - name: Record original configuration text
+      ansible.builtin.set_fact:
+        wazuh_original_config_text: >-
+          {{
+            wazuh_original_config.content | b64decode
+            if wazuh_config_before_stat.stat.exists
+            else ''
+          }}
+
+    - name: Determine whether original configuration targets new manager
+      ansible.builtin.set_fact:
+        wazuh_original_targets_new_manager: >-
+          {{
+            (
+              '<address>' ~ wazuh_manager ~ '</address>'
+            ) in wazuh_original_config_text
+          }}
+
+    - name: Determine whether a populated client key already exists
+      ansible.builtin.set_fact:
+        wazuh_original_key_present: >-
+          {{
+            wazuh_client_key_before_stat.stat.exists
+            and
+            (
+              wazuh_client_key_before_stat.stat.size
+              | default(0)
+              | int
+              > 0
+            )
+          }}
+
+    - name: Display existing Wazuh state
+      ansible.builtin.debug:
+        msg:
+          - "Agent installed before migration: {{ wazuh_agent_installed_before }}"
+          - >-
+            Original configuration targets target manager:
+            {{ wazuh_original_targets_new_manager }}
+          - "Populated client key exists: {{ wazuh_original_key_present }}"
+          - "Force re-enrollment: {{ wazuh_force_reenrollment }}"
+
+  tasks:
+    # =========================================================================
+    # 5. Create backup and package directories
+    # =========================================================================
+
+    - name: Generate backup timestamp
+      ansible.builtin.set_fact:
+        wazuh_backup_timestamp: "{{ ansible_date_time.iso8601_basic_short }}"
+
+    - name: Set host-specific backup directory
+      ansible.builtin.set_fact:
+        wazuh_backup_directory: >-
+          {{ wazuh_backup_root }}/{{ wazuh_backup_timestamp }}
+
+    - name: Create Wazuh backup directory
+      ansible.builtin.file:
+        path: "{{ wazuh_backup_directory }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Back up original Wazuh configuration
+      ansible.builtin.copy:
+        src: "{{ wazuh_config_file }}"
+        dest: "{{ wazuh_backup_directory }}/ossec.conf"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: wazuh_config_before_stat.stat.exists
+
+    - name: Back up original Wazuh client key
+      ansible.builtin.copy:
+        src: "{{ wazuh_client_keys_file }}"
+        dest: "{{ wazuh_backup_directory }}/client.keys"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when: wazuh_original_key_present | bool
+
+    - name: Save pre-migration system information
+      ansible.builtin.copy:
+        content: |
+          Host: {{ inventory_hostname }}
+          Connection address: {{ ansible_host | default(inventory_hostname) }}
+          Backup date: {{ ansible_date_time.iso8601 }}
+          Distribution: {{ ansible_distribution }}
+          Distribution version: {{ ansible_distribution_version }}
+          OS family: {{ ansible_os_family }}
+          Architecture: {{ ansible_architecture }}
+          Agent installed before migration: {{ wazuh_agent_installed_before }}
+          Original configuration targeted new manager: {{ wazuh_original_targets_new_manager }}
+          Original populated client key present: {{ wazuh_original_key_present }}
+          Existing RPM information: {{ wazuh_rpm_query.stdout | default('N/A') }}
+          Existing DEB information: {{ wazuh_deb_query.stdout | default('N/A') }}
+          Target manager: {{ wazuh_manager }}
+          Target registration server: {{ wazuh_registration_server }}
+          Target agent name: {{ wazuh_agent_name }}
+          Target agent group: {{ wazuh_agent_group }}
+          Target agent version: {{ wazuh_agent_version }}-{{ wazuh_agent_release }}
+        dest: "{{ wazuh_backup_directory }}/migration-details.txt"
+        owner: root
+        group: root
+        mode: "0600"
+
+    # =========================================================================
+    # 6. Stop the existing Wazuh service
+    # =========================================================================
+
+    - name: Stop existing Wazuh agent service
+      ansible.builtin.systemd:
+        name: "{{ wazuh_service_name }}"
+        state: stopped
+      failed_when: false
+      when: wazuh_agent_installed_before | bool
+
+    # =========================================================================
+    # 7. Download the correct package
+    # =========================================================================
+
+    - name: Create package download directory
+      ansible.builtin.file:
+        path: "{{ wazuh_download_directory }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+      when:
+        - wazuh_upgrade_agent | bool or not wazuh_agent_installed_before | bool
+
+    - name: Set RPM package information
+      ansible.builtin.set_fact:
+        wazuh_package_path: >-
+          {{ wazuh_download_directory }}/{{ wazuh_rpm_filename }}
+        wazuh_package_url: "{{ wazuh_rpm_url }}"
+      when: ansible_os_family in ['RedHat', 'Suse']
+
+    - name: Set Debian package information
+      ansible.builtin.set_fact:
+        wazuh_package_path: >-
+          {{ wazuh_download_directory }}/{{ wazuh_deb_filename }}
+        wazuh_package_url: "{{ wazuh_deb_url }}"
+      when: ansible_os_family == 'Debian'
+
+    - name: Download Wazuh agent package
+      ansible.builtin.get_url:
+        url: "{{ wazuh_package_url }}"
+        dest: "{{ wazuh_package_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+        timeout: 120
+      when:
+        - wazuh_upgrade_agent | bool or not wazuh_agent_installed_before | bool
+
+    # =========================================================================
+    # 8. Prepare package trust and prerequisites
+    # =========================================================================
+
+    - name: Import Wazuh RPM signing key
+      ansible.builtin.rpm_key:
+        key: "{{ wazuh_signing_key_url }}"
+        state: present
+      when: ansible_os_family in ['RedHat', 'Suse']
+
+    - name: Ensure Debian package prerequisites are installed
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - gnupg
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_os_family == 'Debian'
+
+    # =========================================================================
+    # 9. Install or upgrade the Wazuh agent
+    # =========================================================================
+
+    # - name: Install or upgrade Wazuh agent on RedHat-family systems
+    #   ansible.builtin.dnf:
+    #     name: "{{ wazuh_package_path }}"
+    #     state: present
+    #     disable_gpg_check: false
+    #   environment:
+    #     WAZUH_MANAGER: "{{ wazuh_manager }}"
+    #     WAZUH_REGISTRATION_SERVER: "{{ wazuh_registration_server }}"
+    #     WAZUH_AGENT_NAME: "{{ wazuh_agent_name }}"
+    #     WAZUH_AGENT_GROUP: "{{ wazuh_agent_group }}"
+    #     WAZUH_PROTOCOL: "{{ wazuh_protocol }}"
+    #   when:
+    #     - ansible_os_family == 'RedHat'
+    #     - wazuh_upgrade_agent | bool or not wazuh_agent_installed_before | bool
+    - name: Install or upgrade Wazuh agent on RHEL and CentOS 8 or newer
+      ansible.builtin.dnf:
+        name: "{{ wazuh_package_path }}"
+        state: present
+        disable_gpg_check: false
+        use_backend: dnf4
+      environment:
+        WAZUH_MANAGER: "{{ wazuh_manager }}"
+        WAZUH_REGISTRATION_SERVER: "{{ wazuh_registration_server }}"
+        WAZUH_AGENT_NAME: "{{ wazuh_agent_name }}"
+        WAZUH_AGENT_GROUP: "{{ wazuh_agent_group }}"
+        WAZUH_PROTOCOL: "{{ wazuh_protocol }}"
+      when:
+        - ansible_os_family == 'RedHat'
+        - ansible_distribution_major_version | int >= 8
+        - wazuh_upgrade_agent | bool or not wazuh_agent_installed_before | bool
+
+    - name: Query installed Wazuh version on CentOS and RHEL 7
+      ansible.builtin.command:
+        argv:
+          - rpm
+          - -q
+          - --queryformat
+          - "%{VERSION}-%{RELEASE}"
+          - wazuh-agent
+      register: wazuh_el7_installed_version
+      changed_when: false
+      failed_when: false
+      when:
+        - ansible_os_family == 'RedHat'
+        - ansible_distribution_major_version | int == 7
+
+    - name: Install or upgrade Wazuh agent on CentOS and RHEL 7
+      ansible.builtin.command:
+        argv:
+          - rpm
+          - -Uvh
+          - "{{ wazuh_package_path }}"
+      environment:
+        WAZUH_MANAGER: "{{ wazuh_manager }}"
+        WAZUH_REGISTRATION_SERVER: "{{ wazuh_registration_server }}"
+        WAZUH_AGENT_NAME: "{{ wazuh_agent_name }}"
+        WAZUH_AGENT_GROUP: "{{ wazuh_agent_group }}"
+        WAZUH_PROTOCOL: "{{ wazuh_protocol }}"
+      register: wazuh_el7_rpm_result
+      changed_when: >-
+        wazuh_el7_rpm_result.rc == 0
+        and
+        (
+          'Upgrading' in wazuh_el7_rpm_result.stdout
+          or
+          'Installing' in wazuh_el7_rpm_result.stdout
+          or
+          'Updating' in wazuh_el7_rpm_result.stdout
+        )
+      when:
+        - ansible_os_family == 'RedHat'
+        - ansible_distribution_major_version | int == 7
+        - wazuh_upgrade_agent | bool or not wazuh_agent_installed_before | bool
+
+    - name: Install or upgrade Wazuh agent on Debian-family systems
+      ansible.builtin.apt:
+        deb: "{{ wazuh_package_path }}"
+        state: present
+      environment:
+        WAZUH_MANAGER: "{{ wazuh_manager }}"
+        WAZUH_REGISTRATION_SERVER: "{{ wazuh_registration_server }}"
+        WAZUH_AGENT_NAME: "{{ wazuh_agent_name }}"
+        WAZUH_AGENT_GROUP: "{{ wazuh_agent_group }}"
+        WAZUH_PROTOCOL: "{{ wazuh_protocol }}"
+      when:
+        - ansible_os_family == 'Debian'
+        - wazuh_upgrade_agent | bool or not wazuh_agent_installed_before | bool
+
+    - name: Install or upgrade Wazuh agent on SUSE-family systems
+      ansible.builtin.command:
+        argv:
+          - zypper
+          - --non-interactive
+          - install
+          - --replacefiles
+          - --force-resolution
+          - "{{ wazuh_package_path }}"
+      environment:
+        WAZUH_MANAGER: "{{ wazuh_manager }}"
+        WAZUH_REGISTRATION_SERVER: "{{ wazuh_registration_server }}"
+        WAZUH_AGENT_NAME: "{{ wazuh_agent_name }}"
+        WAZUH_AGENT_GROUP: "{{ wazuh_agent_group }}"
+        WAZUH_PROTOCOL: "{{ wazuh_protocol }}"
+      register: wazuh_zypper_result
+      changed_when: >-
+        'Nothing to do' not in
+        (
+          wazuh_zypper_result.stdout
+          | default('')
+        )
+      when:
+        - ansible_os_family == 'Suse'
+        - wazuh_upgrade_agent | bool or not wazuh_agent_installed_before | bool
+
+    # =========================================================================
+    # 10. Validate installation files
+    # =========================================================================
+
+    - name: Check Wazuh configuration after package operation
+      ansible.builtin.stat:
+        path: "{{ wazuh_config_file }}"
+      register: wazuh_config_after_install
+
+    - name: Check agent-auth binary after package operation
+      ansible.builtin.stat:
+        path: "{{ wazuh_agent_auth_binary }}"
+      register: wazuh_agent_auth_after_install
+
+    - name: Assert that Wazuh installation is usable
+      ansible.builtin.assert:
+        that:
+          - wazuh_config_after_install.stat.exists
+          - wazuh_agent_auth_after_install.stat.exists
+          - wazuh_agent_auth_after_install.stat.executable
+        fail_msg: >-
+          Wazuh installation validation failed on {{ inventory_hostname }}.
+          The configuration file or agent-auth executable is missing.
+        success_msg: >-
+          Wazuh package installation files are present.
+
+    # =========================================================================
+    # 11. Configure the target Wazuh manager
+    # =========================================================================
+
+    - name: Update Wazuh server address entries
+      ansible.builtin.replace:
+        path: "{{ wazuh_config_file }}"
+        regexp: '<address>[^<]+</address>'
+        replace: "<address>{{ wazuh_manager }}</address>"
+        backup: false
+
+    - name: Update existing enrollment manager address entries
+      ansible.builtin.replace:
+        path: "{{ wazuh_config_file }}"
+        regexp: '<manager_address>[^<]+</manager_address>'
+        replace: >-
+          <manager_address>{{ wazuh_registration_server }}</manager_address>
+        backup: false
+
+    - name: Update existing enrollment agent name entries
+      ansible.builtin.replace:
+        path: "{{ wazuh_config_file }}"
+        regexp: '<agent_name>[^<]+</agent_name>'
+        replace: "<agent_name>{{ wazuh_agent_name }}</agent_name>"
+        backup: false
+
+    - name: Read updated Wazuh configuration
+      ansible.builtin.slurp:
+        src: "{{ wazuh_config_file }}"
+      register: wazuh_updated_config
+
+    - name: Record updated configuration text
+      ansible.builtin.set_fact:
+        wazuh_updated_config_text: >-
+          {{ wazuh_updated_config.content | b64decode }}
+
+    - name: Validate target manager configuration
+      ansible.builtin.assert:
+        that:
+          - >-
+            (
+              '<address>' ~ wazuh_manager ~ '</address>'
+            ) in wazuh_updated_config_text
+        fail_msg: >-
+          The target manager {{ wazuh_manager }} was not found in
+          {{ wazuh_config_file }}.
+        success_msg: >-
+          The Wazuh manager is configured as {{ wazuh_manager }}.
+
+    # =========================================================================
+    # 12. Decide whether re-enrollment is required - verify
+    # =========================================================================
+
+    - name: Determine whether Wazuh re-enrollment is required
+      ansible.builtin.set_fact:
+        wazuh_reenrollment_required: >-
+          {{
+            wazuh_force_reenrollment | bool
+            or
+            not wazuh_preserve_target_registration | bool
+            or
+            not wazuh_original_targets_new_manager | bool
+            or
+            not wazuh_original_key_present | bool
+          }}
+
+    - name: Display Wazuh enrollment decision
+      ansible.builtin.debug:
+        msg:
+          - >-
+            Original configuration targeted target manager:
+            {{ wazuh_original_targets_new_manager }}
+          - "Original populated key existed: {{ wazuh_original_key_present }}"
+          - "Preserve target registration: {{ wazuh_preserve_target_registration }}"
+          - "Force re-enrollment: {{ wazuh_force_reenrollment }}"
+          - "Re-enrollment required: {{ wazuh_reenrollment_required }}"
+
+    # =========================================================================
+    # 13. Prepare registration state
+    # =========================================================================
+
+    - name: Archive current client key before re-enrollment
+      ansible.builtin.copy:
+        src: "{{ wazuh_client_keys_file }}"
+        dest: "{{ wazuh_backup_directory }}/client.keys.pre-enrollment"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0600"
+      when:
+        - wazuh_reenrollment_required | bool
+        - wazuh_original_key_present | bool
+
+    - name: Remove client key before re-enrollment
+      ansible.builtin.file:
+        path: "{{ wazuh_client_keys_file }}"
+        state: absent
+      when: wazuh_reenrollment_required | bool
+
+    - name: Create empty client key file before re-enrollment
+      ansible.builtin.file:
+        path: "{{ wazuh_client_keys_file }}"
+        state: touch
+        owner: root
+        group: wazuh
+        mode: "0640"
+        modification_time: preserve
+        access_time: preserve
+      when: wazuh_reenrollment_required | bool
+
+    # =========================================================================
+    # 14. Enroll agent with target Wazuh manager
+    # =========================================================================
+
+    - name: Enroll Wazuh agent without registration password
+      ansible.builtin.command:
+        argv:
+          - "{{ wazuh_agent_auth_binary }}"
+          - -m
+          - "{{ wazuh_registration_server }}"
+          - -p
+          - "{{ wazuh_registration_port | string }}"
+          - -A
+          - "{{ wazuh_agent_name }}"
+          - -G
+          - "{{ wazuh_agent_group }}"
+      register: wazuh_enrollment_no_password
+      changed_when: >-
+        'Valid key received' in
+        (
+          wazuh_enrollment_no_password.stdout
+          | default('')
+        )
+        or
+        'Valid key received' in
+        (
+          wazuh_enrollment_no_password.stderr
+          | default('')
+        )
+      failed_when: false
+      when:
+        - wazuh_reenrollment_required | bool
+        - wazuh_registration_password | length == 0
+
+    - name: Enroll Wazuh agent with registration password
+      ansible.builtin.command:
+        argv:
+          - "{{ wazuh_agent_auth_binary }}"
+          - -m
+          - "{{ wazuh_registration_server }}"
+          - -p
+          - "{{ wazuh_registration_port | string }}"
+          - -A
+          - "{{ wazuh_agent_name }}"
+          - -G
+          - "{{ wazuh_agent_group }}"
+          - -P
+          - "{{ wazuh_registration_password }}"
+      register: wazuh_enrollment_with_password
+      changed_when: >-
+        wazuh_enrollment_with_password.rc | default(1) | int == 0
+      failed_when: false
+      no_log: true
+      when:
+        - wazuh_reenrollment_required | bool
+        - wazuh_registration_password | length > 0
+
+    - name: Consolidate Wazuh enrollment result
+      ansible.builtin.set_fact:
+        wazuh_enrollment_result: >-
+          {{
+            wazuh_enrollment_with_password
+            if wazuh_registration_password | length > 0
+            else wazuh_enrollment_no_password
+          }}
+      when: wazuh_reenrollment_required | bool
+
+    - name: Detect duplicate agent registration
+      ansible.builtin.set_fact:
+        wazuh_duplicate_agent_name: >-
+          {{
+            'Duplicate agent name' in
+            (
+              (
+                wazuh_enrollment_result.stdout
+                | default('')
+              )
+              ~
+              (
+                wazuh_enrollment_result.stderr
+                | default('')
+              )
+            )
+          }}
+      when: wazuh_reenrollment_required | bool
+
+    - name: Fail with duplicate-agent remediation
+      ansible.builtin.fail:
+        msg: |
+          Wazuh enrollment failed because the target manager already contains
+          an agent named {{ wazuh_agent_name }}.
+
+          Target manager:
+            {{ wazuh_registration_server }}
+
+          Remediation:
+            1. Confirm whether the existing manager entry belongs to this host.
+            2. Remove the stale or duplicate entry from the target manager.
+            3. Rerun this playbook for this host.
+
+          Manager command:
+            /var/ossec/bin/manage_agents
+
+          agent-auth output:
+          {{
+            (
+              wazuh_enrollment_result.stdout
+              | default('')
+            )
+            ~
+            (
+              wazuh_enrollment_result.stderr
+              | default('')
+            )
+          }}
+      when:
+        - wazuh_reenrollment_required | bool
+        - wazuh_duplicate_agent_name | default(false) | bool
+
+    - name: Validate agent-auth return code
+      ansible.builtin.assert:
+        that:
+          - wazuh_enrollment_result.rc | int == 0
+        fail_msg: |
+          Wazuh agent enrollment failed on {{ inventory_hostname }}.
+
+          agent-auth return code:
+            {{ wazuh_enrollment_result.rc | default('unknown') }}
+
+          agent-auth output:
+          {{
+            (
+              wazuh_enrollment_result.stdout
+              | default('')
+            )
+            ~
+            (
+              wazuh_enrollment_result.stderr
+              | default('')
+            )
+          }}
+        success_msg: >-
+          Wazuh agent enrollment completed successfully.
+      when: wazuh_reenrollment_required | bool
+
+    # =========================================================================
+    # 15. Validate local client key
+    # =========================================================================
+
+    - name: Check Wazuh client key after enrollment decision
+      ansible.builtin.stat:
+        path: "{{ wazuh_client_keys_file }}"
+      register: wazuh_final_client_key
+
+    - name: Validate populated Wazuh client key
+      ansible.builtin.assert:
+        that:
+          - wazuh_final_client_key.stat.exists
+          - wazuh_final_client_key.stat.size | int > 0
+        fail_msg: >-
+          Wazuh client key is missing or empty on {{ inventory_hostname }}.
+          Review {{ wazuh_backup_directory }} and the agent-auth output.
+        success_msg: >-
+          Wazuh agent has a populated client key.
+
+    - name: Enforce Wazuh client key ownership and permissions
+      ansible.builtin.file:
+        path: "{{ wazuh_client_keys_file }}"
+        state: file
+        owner: root
+        group: wazuh
+        mode: "0640"
+
+    # =========================================================================
+    # 16. Start and enable Wazuh agent
+    # =========================================================================
+
+    - name: Reload systemd configuration
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: Enable and start Wazuh agent
+      ansible.builtin.systemd:
+        name: "{{ wazuh_service_name }}"
+        enabled: true
+        state: restarted
+
+    # =========================================================================
+    # 17. Validate service state
+    # =========================================================================
+
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
+    - name: Validate Wazuh service is running
+      ansible.builtin.assert:
+        that:
+          - wazuh_service_name + '.service' in ansible_facts.services
+          - >-
+            ansible_facts.services[wazuh_service_name + '.service'].state
+            == 'running'
+        fail_msg: >-
+          The Wazuh agent service is not running on {{ inventory_hostname }}.
+        success_msg: >-
+          The Wazuh agent service is running.
+
+    - name: Validate Wazuh component status
+      ansible.builtin.command:
+        argv:
+          - "{{ wazuh_control_binary }}"
+          - status
+      register: wazuh_control_status
+      changed_when: false
+
+    - name: Display Wazuh component status
+      ansible.builtin.debug:
+        var: wazuh_control_status.stdout_lines
+
+    # =========================================================================
+    # 18. Validate live TCP connection to target manager
+    # =========================================================================
+
+    - name: Wait for live Wazuh TCP connection
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        target="{{ wazuh_manager }}"
+        port="{{ wazuh_manager_port }}"
+        timeout="{{ wazuh_connection_timeout }}"
+        elapsed=0
+
+        while [ "${elapsed}" -lt "${timeout}" ]; do
+          if ss -Hnt 2>/dev/null |
+             grep -E "ESTAB.*${target//./\\.}:${port}([[:space:]]|$)" \
+             >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          sleep 5
+          elapsed=$((elapsed + 5))
+        done
+
+        echo "No established TCP connection to ${target}:${port}"
+        echo
+        echo "Current TCP sessions:"
+        ss -nt 2>/dev/null || true
+        echo
+        echo "Recent Wazuh log entries:"
+        tail -n 50 "{{ wazuh_log_file }}" 2>/dev/null || true
+
+        exit 1
+      args:
+        executable: /bin/bash
+      register: wazuh_connection_validation
+      changed_when: false
+      when: wazuh_protocol == "tcp"
+
+    # =========================================================================
+    # 19. Collect final package information
+    # =========================================================================
+
+    - name: Query final Wazuh RPM version
+      ansible.builtin.command:
+        argv:
+          - rpm
+          - -q
+          - wazuh-agent
+      register: wazuh_final_rpm_version
+      changed_when: false
+      when: ansible_os_family in ['RedHat', 'Suse']
+
+    - name: Query final Wazuh Debian version
+      ansible.builtin.command:
+        argv:
+          - dpkg-query
+          - -W
+          - "-f=${Package}-${Version}"
+          - wazuh-agent
+      register: wazuh_final_deb_version
+      changed_when: false
+      when: ansible_os_family == 'Debian'
+
+    - name: Set final Wazuh package version
+      ansible.builtin.set_fact:
+        wazuh_final_package_version: >-
+          {{
+            wazuh_final_rpm_version.stdout
+            if ansible_os_family in ['RedHat', 'Suse']
+            else wazuh_final_deb_version.stdout
+          }}
+
+    # =========================================================================
+    # 20. Display final migration result
+    # =========================================================================
+
+    - name: Display Wazuh migration result
+      ansible.builtin.debug:
+        msg:
+          - "Wazuh migration completed successfully."
+          - "Host: {{ inventory_hostname }}"
+          - "Agent name: {{ wazuh_agent_name }}"
+          - "Agent group: {{ wazuh_agent_group }}"
+          - "Manager: {{ wazuh_manager }}:{{ wazuh_manager_port }}"
+          - "Installed package: {{ wazuh_final_package_version }}"
+          - "Re-enrollment performed: {{ wazuh_reenrollment_required }}"
+          - "Service status: running"
+          - "Backup directory: {{ wazuh_backup_directory }}"
+
+    # =========================================================================
+    # 21. Remove downloaded package
+    # =========================================================================
+
+    - name: Remove downloaded Wazuh installation package
+      ansible.builtin.file:
+        path: "{{ wazuh_package_path }}"
+        state: absent
+      when:
+        - wazuh_remove_downloaded_package | bool
+        - wazuh_package_path is defined
