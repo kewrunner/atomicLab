@@ -1,0 +1,1164 @@
+---
+# =============================================================================
+# Playbook: elastic_agent_migrate.yml
+#
+# Purpose:
+#   Remove an existing Elastic Agent installation and enroll the host with the
+#   new Elastic Fleet Server and the Lab Linux Servers policy.
+#
+# Supported operating-system families:
+#   - Debian/Ubuntu
+#   - Red Hat/CentOS
+#   - SLES/openSUSE
+#
+# Existing installation methods handled:
+#   - Archive installation under /opt/Elastic/Agent
+#   - Debian package installation
+#   - RPM package installation
+#   - Partial PATH-only or service-only installation
+#   - Host with no existing Elastic Agent
+#
+# Safety controls:
+#   - Processes one host at a time.
+#   - Allows powered-off hosts to report UNREACHABLE without stopping all hosts.
+#   - Verifies Fleet Server before removing an existing Agent.
+#   - Verifies the Elasticsearch output before removing an existing Agent.
+#   - Verifies Elastic artifact DNS and download reachability before removal.
+#   - Uses /opt for staging to avoid hardened noexec /tmp or /var/tmp mounts.
+#   - Validates the official SHA512 checksum.
+#   - Keeps enrollment-token output hidden.
+#   - Waits briefly for the Agent to connect to Fleet.
+#   - Allows temporary STARTING or DEGRADED integration states during rollout.
+#   - Rejects STOPPED and FAILED Agent states.
+#
+# Required encrypted variables:
+#   vault_elastic_agent_enrollment_token
+#   vault_lab_ssh_password
+#   vault_lab_become_password
+#
+# Example:
+#   ansible-playbook elastic_agent_migrate.yml \
+#     --limit 'lab-suse15-aap-client-970-223'
+# =============================================================================
+
+- name: Remove previous Elastic Agent and enroll with the new Fleet Server
+  hosts: elastic_lab
+  become: true
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: false
+
+  vars:
+    # =========================================================================
+    # Elastic Agent version
+    # =========================================================================
+    elastic_agent_version: "9.4.4"
+
+    # =========================================================================
+    # Fleet Server
+    # =========================================================================
+    elastic_fleet_server_url: "https://elastic.cloudandlinux.com:8220"
+    elastic_fleet_server_host: "elastic.cloudandlinux.com"
+    elastic_fleet_server_port: 8220
+    elastic_agent_insecure_enrollment: true
+
+    # =========================================================================
+    # Elasticsearch output assigned to the Lab Linux Servers policy
+    # =========================================================================
+    elastic_output_url: "https://64.182.20.92:9220"
+    elastic_output_host: "64.182.20.92"
+    elastic_output_port: 9220
+    elastic_output_validate_certs: false
+
+    # =========================================================================
+    # Migration behavior
+    # =========================================================================
+    elastic_agent_force_reinstall: true
+    elastic_agent_remove_residual_state: true
+    elastic_agent_remove_staging_after_success: true
+
+    # =========================================================================
+    # Artifact and installation paths
+    # =========================================================================
+    elastic_agent_artifact_base_url: >-
+      https://artifacts.elastic.co/downloads/beats/elastic-agent
+
+    # /opt is used because some lab systems mount /tmp or /var/tmp with noexec.
+    elastic_agent_staging_dir: "/opt/elastic-agent-migration"
+    elastic_agent_install_dir: "/opt/Elastic/Agent"
+
+    # =========================================================================
+    # Vault-protected enrollment token
+    #
+    # This token must belong to the "Lab Linux Servers" Agent policy.
+    # =========================================================================
+    elastic_agent_enrollment_token: >-
+      {{ vault_elastic_agent_enrollment_token }}
+
+    # =========================================================================
+    # Supported platforms
+    # =========================================================================
+    elastic_agent_supported_families:
+      - Debian
+      - RedHat
+      - Suse
+
+    elastic_agent_legacy_os_allowed: true
+
+    elastic_agent_architecture_map:
+      x86_64: "x86_64"
+      amd64: "x86_64"
+      aarch64: "arm64"
+      arm64: "arm64"
+
+    # =========================================================================
+    # Validation timing
+    # =========================================================================
+
+    # Service startup may take longer than Fleet connection, so retain the
+    # broader service wait while using a shorter post-enrollment Fleet check.
+    elastic_agent_health_retries: 30
+    elastic_agent_health_delay: 10
+
+    # Practical rollout validation:
+    #   6 retries x 5 seconds = approximately 30 seconds maximum.
+    elastic_agent_fleet_connect_retries: 6
+    elastic_agent_fleet_connect_delay: 5
+
+  pre_tasks:
+    # =========================================================================
+    # 1. Display migration target
+    # =========================================================================
+    - name: Display migration target
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Connection address: {{ ansible_host | default(inventory_hostname) }}"
+          - "Distribution: {{ ansible_distribution }}"
+          - "Version: {{ ansible_distribution_version }}"
+          - "OS family: {{ ansible_os_family }}"
+          - "Architecture: {{ ansible_architecture }}"
+          - "Fleet Server: {{ elastic_fleet_server_url }}"
+          - "Elasticsearch output: {{ elastic_output_url }}"
+          - "Elastic Agent version: {{ elastic_agent_version }}"
+
+    # =========================================================================
+    # 2. Validate required variables
+    # =========================================================================
+    - name: Validate required Elastic Agent variables
+      ansible.builtin.assert:
+        that:
+          - elastic_agent_version | length > 0
+          - elastic_fleet_server_url | length > 0
+          - elastic_fleet_server_host | length > 0
+          - elastic_fleet_server_port | int > 0
+          - elastic_output_url | length > 0
+          - elastic_output_host | length > 0
+          - elastic_output_port | int > 0
+          - elastic_agent_enrollment_token | length > 20
+          - elastic_agent_enrollment_token != 'PASTE_LAB_LINUX_SERVERS_ENROLLMENT_TOKEN'
+        fail_msg: >-
+          One or more required Elastic Agent variables are missing. Confirm
+          that the Vault contains the enrollment token associated with the
+          Lab Linux Servers Agent policy.
+        success_msg: "Required Elastic Agent variables are present."
+      no_log: true
+
+    # =========================================================================
+    # 3. Validate target operating system
+    # =========================================================================
+    - name: Validate supported operating system family
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family in elastic_agent_supported_families
+        fail_msg: >-
+          Unsupported operating system family {{ ansible_os_family }} on
+          {{ inventory_hostname }}.
+        success_msg: >-
+          Operating system family {{ ansible_os_family }} is accepted by the
+          migration playbook.
+
+    - name: Identify legacy RHEL or CentOS release
+      ansible.builtin.set_fact:
+        elastic_agent_legacy_os: >-
+          {{
+            ansible_os_family == 'RedHat'
+            and
+            (ansible_distribution_major_version | int) <= 7
+          }}
+
+    - name: Warn about legacy RHEL or CentOS release
+      ansible.builtin.debug:
+        msg:
+          - >-
+            WARNING: {{ inventory_hostname }} runs
+            {{ ansible_distribution }} {{ ansible_distribution_version }}.
+          - >-
+            Migration will continue because
+            elastic_agent_legacy_os_allowed=true.
+      when: elastic_agent_legacy_os | bool
+
+    - name: Block legacy operating system when not explicitly allowed
+      ansible.builtin.assert:
+        that:
+          - not elastic_agent_legacy_os or elastic_agent_legacy_os_allowed | bool
+        fail_msg: >-
+          Legacy operating-system migration is disabled. Set
+          elastic_agent_legacy_os_allowed=true to permit migration.
+
+    # =========================================================================
+    # 4. Resolve architecture and artifact details
+    # =========================================================================
+    - name: Validate host architecture
+      ansible.builtin.assert:
+        that:
+          - ansible_architecture in elastic_agent_architecture_map
+        fail_msg: >-
+          Architecture {{ ansible_architecture }} is not mapped for Elastic
+          Agent installation.
+
+    - name: Set Elastic Agent artifact facts
+      ansible.builtin.set_fact:
+        elastic_agent_download_arch: >-
+          {{ elastic_agent_architecture_map[ansible_architecture] }}
+        elastic_agent_archive_name: >-
+          elastic-agent-{{ elastic_agent_version }}-linux-{{
+          elastic_agent_architecture_map[ansible_architecture] }}.tar.gz
+        elastic_agent_extract_dir: >-
+          {{ elastic_agent_staging_dir }}/elastic-agent-{{
+          elastic_agent_version }}-linux-{{
+          elastic_agent_architecture_map[ansible_architecture] }}
+
+    - name: Set Elastic Agent download URLs
+      ansible.builtin.set_fact:
+        elastic_agent_archive_url: >-
+          {{ elastic_agent_artifact_base_url }}/{{ elastic_agent_archive_name }}
+        elastic_agent_checksum_url: >-
+          {{ elastic_agent_artifact_base_url }}/{{ elastic_agent_archive_name }}.sha512
+
+    # =========================================================================
+    # 5. Verify Fleet Server before changing the host
+    # =========================================================================
+    - name: Wait for Fleet Server TCP connectivity
+      ansible.builtin.wait_for:
+        host: "{{ elastic_fleet_server_host }}"
+        port: "{{ elastic_fleet_server_port }}"
+        state: started
+        timeout: 20
+        connect_timeout: 5
+      changed_when: false
+
+    - name: Query Fleet Server status endpoint
+      ansible.builtin.uri:
+        url: "{{ elastic_fleet_server_url }}/api/status"
+        method: GET
+        validate_certs: "{{ not elastic_agent_insecure_enrollment | bool }}"
+        return_content: true
+        status_code: 200
+        timeout: 20
+      register: elastic_fleet_status
+      changed_when: false
+
+    - name: Validate Fleet Server health response
+      ansible.builtin.assert:
+        that:
+          - elastic_fleet_status.status == 200
+          - "'HEALTHY' in (elastic_fleet_status.content | default('') | upper)"
+        fail_msg: "Fleet Server responded but did not report HEALTHY."
+        success_msg: "Fleet Server is reachable and healthy."
+
+    - name: Display Fleet Server reachability
+      ansible.builtin.debug:
+        msg:
+          - "Fleet Server TCP connectivity: PASS"
+          - "Fleet Server HTTP status: {{ elastic_fleet_status.status }}"
+          - >-
+            Fleet Server response:
+            {{ elastic_fleet_status.content | default('N/A') }}
+
+    # =========================================================================
+    # 6. Verify Elasticsearch output before changing the host
+    # =========================================================================
+    - name: Wait for Elasticsearch output TCP connectivity
+      ansible.builtin.wait_for:
+        host: "{{ elastic_output_host }}"
+        port: "{{ elastic_output_port }}"
+        state: started
+        timeout: 20
+        connect_timeout: 5
+      changed_when: false
+
+    - name: Query Elasticsearch output without credentials
+      ansible.builtin.uri:
+        url: "{{ elastic_output_url }}/"
+        method: GET
+        validate_certs: "{{ elastic_output_validate_certs }}"
+        status_code: 401
+        return_content: true
+        timeout: 20
+      register: elastic_output_precheck
+      changed_when: false
+
+    - name: Validate Elasticsearch output response
+      ansible.builtin.assert:
+        that:
+          - elastic_output_precheck.status == 401
+        fail_msg: >-
+          Elasticsearch output {{ elastic_output_url }} did not return the
+          expected unauthenticated HTTP 401 response.
+        success_msg: >-
+          Elasticsearch output is reachable and authentication is required.
+
+    - name: Display Elasticsearch output reachability
+      ansible.builtin.debug:
+        msg:
+          - "Elasticsearch output TCP connectivity: PASS"
+          - "Elasticsearch output HTTP status: {{ elastic_output_precheck.status }}"
+          - "Expected unauthenticated HTTP status: 401"
+
+    # =========================================================================
+    # 7. Verify Elastic artifact repository before removing an existing Agent
+    # =========================================================================
+    - name: Resolve Elastic artifact repository
+      ansible.builtin.command:
+        argv:
+          - getent
+          - ahosts
+          - artifacts.elastic.co
+      register: elastic_artifact_dns_check
+      changed_when: false
+      failed_when: false
+
+    - name: Validate Elastic artifact repository DNS
+      ansible.builtin.assert:
+        that:
+          - elastic_artifact_dns_check.rc == 0
+          - elastic_artifact_dns_check.stdout | trim | length > 0
+        fail_msg: >-
+          artifacts.elastic.co could not be resolved. The existing Elastic
+          Agent will not be removed.
+        success_msg: "Elastic artifact repository DNS resolution: PASS"
+
+    - name: Verify Elastic Agent archive is reachable
+      ansible.builtin.uri:
+        url: "{{ elastic_agent_archive_url }}"
+        method: HEAD
+        validate_certs: true
+        status_code:
+          - 200
+          - 301
+          - 302
+          - 307
+          - 308
+        follow_redirects: safe
+        timeout: 30
+      register: elastic_artifact_repository_check
+      changed_when: false
+
+    - name: Verify Elastic Agent checksum is reachable
+      ansible.builtin.uri:
+        url: "{{ elastic_agent_checksum_url }}"
+        method: HEAD
+        validate_certs: true
+        status_code:
+          - 200
+          - 301
+          - 302
+          - 307
+          - 308
+        follow_redirects: safe
+        timeout: 30
+      register: elastic_checksum_repository_check
+      changed_when: false
+
+    - name: Display Elastic artifact repository reachability
+      ansible.builtin.debug:
+        msg:
+          - "Artifact DNS resolution: PASS"
+          - >-
+            Agent archive HTTP status:
+            {{ elastic_artifact_repository_check.status }}
+          - >-
+            Checksum HTTP status:
+            {{ elastic_checksum_repository_check.status }}
+          - "Archive: {{ elastic_agent_archive_name }}"
+
+  tasks:
+    # =========================================================================
+    # 8. Detect the existing Elastic Agent installation
+    # =========================================================================
+    - name: Check archive-based Elastic Agent installation path
+      ansible.builtin.stat:
+        path: "{{ elastic_agent_install_dir }}/elastic-agent"
+        follow: true
+      register: elastic_agent_native_binary
+
+    - name: Find Elastic Agent in PATH
+      ansible.builtin.command:
+        argv:
+          - /bin/sh
+          - -c
+          - command -v elastic-agent
+      register: elastic_agent_path_lookup
+      changed_when: false
+      failed_when: false
+
+    - name: Check whether Elastic Agent is installed as a Debian package
+      ansible.builtin.command:
+        argv:
+          - dpkg-query
+          - -W
+          - "-f=${Status}"
+          - elastic-agent
+      register: elastic_agent_deb_package
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == 'Debian'
+
+    - name: Check whether Elastic Agent is installed as an RPM package
+      ansible.builtin.command:
+        argv:
+          - rpm
+          - -q
+          - elastic-agent
+      register: elastic_agent_rpm_package
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family in ['RedHat', 'Suse']
+
+    - name: Check Elastic Agent systemd service
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - elastic-agent.service
+          - --property=LoadState,ActiveState,SubState
+          - --no-pager
+      register: elastic_agent_service_before
+      changed_when: false
+      failed_when: false
+
+    - name: Capture archive-based Elastic Agent status
+      ansible.builtin.command:
+        argv:
+          - "{{ elastic_agent_install_dir }}/elastic-agent"
+          - status
+      register: elastic_agent_archive_status_before
+      changed_when: false
+      failed_when: false
+      when: elastic_agent_native_binary.stat.exists
+
+    - name: Capture PATH-based Elastic Agent version
+      ansible.builtin.command:
+        argv:
+          - "{{ elastic_agent_path_lookup.stdout | trim }}"
+          - version
+          - --binary-only
+      register: elastic_agent_path_version_before
+      changed_when: false
+      failed_when: false
+      when:
+        - elastic_agent_path_lookup.rc == 0
+        - elastic_agent_path_lookup.stdout | trim | length > 0
+
+    - name: Determine Elastic Agent installation type
+      ansible.builtin.set_fact:
+        elastic_agent_installation_type: >-
+          {{
+            'archive'
+            if elastic_agent_native_binary.stat.exists
+            else
+            (
+              'deb'
+              if
+              (
+                ansible_os_family == 'Debian'
+                and
+                (elastic_agent_deb_package.rc | default(1)) == 0
+              )
+              else
+              (
+                'rpm'
+                if
+                (
+                  ansible_os_family in ['RedHat', 'Suse']
+                  and
+                  (elastic_agent_rpm_package.rc | default(1)) == 0
+                )
+                else
+                (
+                  'path-only'
+                  if elastic_agent_path_lookup.rc == 0
+                  else
+                  (
+                    'service-only'
+                    if
+                    (
+                      'LoadState=loaded' in
+                      (elastic_agent_service_before.stdout | default(''))
+                    )
+                    else 'not-installed'
+                  )
+                )
+              )
+            )
+          }}
+
+    - name: Display existing Elastic Agent state
+      ansible.builtin.debug:
+        msg:
+          - "Installation type: {{ elastic_agent_installation_type }}"
+          - "Archive binary present: {{ elastic_agent_native_binary.stat.exists }}"
+          - >-
+            PATH lookup:
+            {{ elastic_agent_path_lookup.stdout | default('not found') | trim }}
+          - >-
+            Debian package status:
+            {{
+              elastic_agent_deb_package.stdout
+              | default('not applicable or not installed')
+              | trim
+            }}
+          - >-
+            RPM package status:
+            {{
+              elastic_agent_rpm_package.stdout
+              | default('not applicable or not installed')
+              | trim
+            }}
+          - >-
+            Service state:
+            {{
+              elastic_agent_service_before.stdout
+              | default('service not installed')
+            }}
+          - >-
+            Existing version:
+            {{
+              elastic_agent_path_version_before.stdout
+              | default('version unavailable')
+              | trim
+            }}
+
+    - name: Determine whether removal is required
+      ansible.builtin.set_fact:
+        elastic_agent_removal_required: >-
+          {{
+            elastic_agent_force_reinstall | bool
+            and
+            elastic_agent_installation_type != 'not-installed'
+          }}
+
+    - name: Display removal decision
+      ansible.builtin.debug:
+        msg:
+          - "Force reinstall: {{ elastic_agent_force_reinstall }}"
+          - "Removal required: {{ elastic_agent_removal_required }}"
+          - "Removal method: {{ elastic_agent_installation_type }}"
+
+    # =========================================================================
+    # 9. Remove the existing Elastic Agent
+    # =========================================================================
+    - name: Uninstall archive-based Elastic Agent
+      ansible.builtin.command:
+        argv:
+          - "{{ elastic_agent_install_dir }}/elastic-agent"
+          - uninstall
+          - --force
+        chdir: /tmp
+      register: elastic_agent_archive_uninstall
+      changed_when: elastic_agent_archive_uninstall.rc == 0
+      failed_when: false
+      when:
+        - elastic_agent_removal_required | bool
+        - elastic_agent_installation_type == 'archive'
+
+    - name: Display archive uninstall result
+      ansible.builtin.debug:
+        msg:
+          - "Return code: {{ elastic_agent_archive_uninstall.rc | default('N/A') }}"
+          - >-
+            Standard output:
+            {{
+              elastic_agent_archive_uninstall.stdout
+              | default('No standard output')
+            }}
+          - >-
+            Standard error:
+            {{
+              elastic_agent_archive_uninstall.stderr
+              | default('No standard error')
+            }}
+      when:
+        - elastic_agent_removal_required | bool
+        - elastic_agent_installation_type == 'archive'
+
+    - name: Stop package-based or residual Elastic Agent service
+      ansible.builtin.systemd:
+        name: elastic-agent
+        state: stopped
+      failed_when: false
+      when:
+        - elastic_agent_removal_required | bool
+        - elastic_agent_installation_type in
+          ['deb', 'rpm', 'path-only', 'service-only']
+
+    - name: Remove Debian Elastic Agent package
+      ansible.builtin.apt:
+        name: elastic-agent
+        state: absent
+        purge: true
+        update_cache: false
+      when:
+        - elastic_agent_removal_required | bool
+        - elastic_agent_installation_type == 'deb'
+
+    - name: Remove RPM Elastic Agent package
+      ansible.builtin.package:
+        name: elastic-agent
+        state: absent
+      when:
+        - elastic_agent_removal_required | bool
+        - elastic_agent_installation_type == 'rpm'
+
+    - name: Stop and disable residual Elastic Agent service
+      ansible.builtin.systemd:
+        name: elastic-agent
+        state: stopped
+        enabled: false
+      failed_when: false
+      when: elastic_agent_removal_required | bool
+
+    - name: Stop residual archive-based Elastic Agent processes
+      ansible.builtin.shell: |
+        set -o pipefail
+
+        matching_pids="$(
+          pgrep -f '^/opt/Elastic/Agent/' 2>/dev/null || true
+        )"
+
+        if [[ -n "${matching_pids}" ]]; then
+          kill -TERM ${matching_pids} 2>/dev/null || true
+          sleep 3
+        fi
+
+        remaining_pids="$(
+          pgrep -f '^/opt/Elastic/Agent/' 2>/dev/null || true
+        )"
+
+        if [[ -n "${remaining_pids}" ]]; then
+          kill -KILL ${remaining_pids} 2>/dev/null || true
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+      failed_when: false
+      when:
+        - elastic_agent_removal_required | bool
+        - elastic_agent_remove_residual_state | bool
+
+    - name: Remove residual Elastic Agent files and directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /opt/Elastic/Agent
+        - /etc/elastic-agent
+        - /var/lib/elastic-agent
+        - /var/log/elastic-agent
+        - /etc/systemd/system/elastic-agent.service
+        - /usr/lib/systemd/system/elastic-agent.service
+        - /run/elastic-agent.sock
+      when:
+        - elastic_agent_removal_required | bool
+        - elastic_agent_remove_residual_state | bool
+
+    - name: Remove residual PATH binary for partial installations
+      ansible.builtin.file:
+        path: "{{ elastic_agent_path_lookup.stdout | trim }}"
+        state: absent
+      when:
+        - elastic_agent_removal_required | bool
+        - elastic_agent_remove_residual_state | bool
+        - elastic_agent_installation_type in ['path-only', 'service-only']
+        - elastic_agent_path_lookup.rc == 0
+        - elastic_agent_path_lookup.stdout | trim | length > 0
+        - elastic_agent_path_lookup.stdout | trim in
+          ['/usr/bin/elastic-agent', '/usr/local/bin/elastic-agent']
+
+    - name: Reload systemd after previous Agent removal
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: elastic_agent_removal_required | bool
+
+    - name: Reset failed Elastic Agent service state
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - reset-failed
+          - elastic-agent.service
+      changed_when: false
+      failed_when: false
+      when: elastic_agent_removal_required | bool
+
+    # =========================================================================
+    # 10. Verify previous installation removal
+    # =========================================================================
+    - name: Verify Debian Elastic Agent package is absent
+      ansible.builtin.command:
+        argv:
+          - dpkg-query
+          - -W
+          - "-f=${Status}"
+          - elastic-agent
+      register: elastic_agent_deb_verify
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family == 'Debian'
+
+    - name: Verify RPM Elastic Agent package is absent
+      ansible.builtin.command:
+        argv:
+          - rpm
+          - -q
+          - elastic-agent
+      register: elastic_agent_rpm_verify
+      changed_when: false
+      failed_when: false
+      when: ansible_os_family in ['RedHat', 'Suse']
+
+    - name: Check archive installation path after removal
+      ansible.builtin.stat:
+        path: "{{ elastic_agent_install_dir }}/elastic-agent"
+        follow: true
+      register: elastic_agent_native_binary_after_removal
+
+    - name: Check Elastic Agent PATH after removal
+      ansible.builtin.command:
+        argv:
+          - /bin/sh
+          - -c
+          - command -v elastic-agent
+      register: elastic_agent_path_after_removal
+      changed_when: false
+      failed_when: false
+
+    - name: Confirm previous Elastic Agent installation was removed
+      ansible.builtin.assert:
+        that:
+          - not elastic_agent_native_binary_after_removal.stat.exists
+          - elastic_agent_path_after_removal.rc != 0
+          - >-
+            ansible_os_family != 'Debian'
+            or
+            (elastic_agent_deb_verify.rc | default(1)) != 0
+          - >-
+            ansible_os_family not in ['RedHat', 'Suse']
+            or
+            (elastic_agent_rpm_verify.rc | default(1)) != 0
+        fail_msg: >-
+          The previous Elastic Agent installation is still present. Migration
+          cannot safely continue.
+        success_msg: "The previous Elastic Agent installation has been removed."
+
+    # =========================================================================
+    # 11. Create staging directory and download Elastic Agent
+    # =========================================================================
+    - name: Remove previous Elastic Agent staging directory
+      ansible.builtin.file:
+        path: "{{ elastic_agent_staging_dir }}"
+        state: absent
+
+    - name: Create Elastic Agent staging directory
+      ansible.builtin.file:
+        path: "{{ elastic_agent_staging_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Download Elastic Agent archive
+      ansible.builtin.get_url:
+        url: "{{ elastic_agent_archive_url }}"
+        dest: "{{ elastic_agent_staging_dir }}/{{ elastic_agent_archive_name }}"
+        owner: root
+        group: root
+        mode: "0640"
+        timeout: 180
+
+    - name: Download Elastic Agent SHA512 checksum
+      ansible.builtin.get_url:
+        url: "{{ elastic_agent_checksum_url }}"
+        dest: >-
+          {{ elastic_agent_staging_dir }}/{{ elastic_agent_archive_name }}.sha512
+        owner: root
+        group: root
+        mode: "0640"
+        timeout: 60
+
+    # =========================================================================
+    # 12. Verify and extract Elastic Agent
+    # =========================================================================
+    - name: Verify Elastic Agent archive checksum
+      ansible.builtin.command:
+        argv:
+          - sha512sum
+          - --check
+          - "{{ elastic_agent_archive_name }}.sha512"
+        chdir: "{{ elastic_agent_staging_dir }}"
+      register: elastic_agent_checksum_result
+      changed_when: false
+
+    - name: Display checksum result
+      ansible.builtin.debug:
+        var: elastic_agent_checksum_result.stdout
+
+    - name: Extract Elastic Agent archive
+      ansible.builtin.unarchive:
+        src: "{{ elastic_agent_staging_dir }}/{{ elastic_agent_archive_name }}"
+        dest: "{{ elastic_agent_staging_dir }}"
+        remote_src: true
+        owner: root
+        group: root
+
+    - name: Verify extracted Elastic Agent binary path
+      ansible.builtin.stat:
+        path: "{{ elastic_agent_extract_dir }}/elastic-agent"
+        follow: true
+      register: elastic_agent_extracted_binary_before_mode
+
+    - name: Confirm extracted Elastic Agent binary exists
+      ansible.builtin.assert:
+        that:
+          - elastic_agent_extracted_binary_before_mode.stat.exists
+        fail_msg: >-
+          The archive was extracted, but the Elastic Agent binary was not found
+          at {{ elastic_agent_extract_dir }}/elastic-agent.
+        success_msg: "Elastic Agent binary was found after extraction."
+
+    - name: Ensure extracted Elastic Agent binary is executable
+      ansible.builtin.file:
+        path: "{{ elastic_agent_extract_dir }}/elastic-agent"
+        owner: root
+        group: root
+        mode: "0755"
+        follow: true
+
+    - name: Recheck extracted Elastic Agent binary permissions
+      ansible.builtin.stat:
+        path: "{{ elastic_agent_extract_dir }}/elastic-agent"
+        follow: true
+      register: elastic_agent_extracted_binary
+
+    - name: Confirm extracted Elastic Agent binary is executable
+      ansible.builtin.assert:
+        that:
+          - elastic_agent_extracted_binary.stat.exists
+          - elastic_agent_extracted_binary.stat.executable
+        fail_msg: >-
+          The Elastic Agent binary exists but cannot be executed at
+          {{ elastic_agent_extract_dir }}/elastic-agent. Check whether the
+          staging filesystem is mounted with noexec.
+        success_msg: "Elastic Agent binary permissions are valid."
+
+    - name: Validate extracted Elastic Agent executable
+      ansible.builtin.command:
+        argv:
+          - "{{ elastic_agent_extract_dir }}/elastic-agent"
+          - version
+          - --binary-only
+      register: elastic_agent_extracted_version
+      changed_when: false
+
+    - name: Validate extracted Elastic Agent version
+      ansible.builtin.assert:
+        that:
+          - elastic_agent_version in elastic_agent_extracted_version.stdout
+        fail_msg: >-
+          The extracted Elastic Agent does not report version
+          {{ elastic_agent_version }}.
+        success_msg: >-
+          Extracted Elastic Agent version {{ elastic_agent_version }} is valid.
+
+    - name: Display extracted Elastic Agent version
+      ansible.builtin.debug:
+        msg: "{{ elastic_agent_extracted_version.stdout | trim }}"
+
+    # =========================================================================
+    # 13. Build and execute enrollment
+    # =========================================================================
+    - name: Build Elastic Agent enrollment command
+      ansible.builtin.set_fact:
+        elastic_agent_install_argv: >-
+          {{
+            [
+              elastic_agent_extract_dir + '/elastic-agent',
+              'install',
+              '--url=' + elastic_fleet_server_url,
+              '--enrollment-token=' + elastic_agent_enrollment_token,
+              '--non-interactive'
+            ]
+            +
+            (
+              ['--insecure']
+              if elastic_agent_insecure_enrollment | bool
+              else []
+            )
+          }}
+      no_log: true
+
+    - name: Install and enroll Elastic Agent
+      block:
+        - name: Execute Elastic Agent installation
+          ansible.builtin.command:
+            argv: "{{ elastic_agent_install_argv }}"
+            chdir: "{{ elastic_agent_extract_dir }}"
+          register: elastic_agent_install_result
+          changed_when: elastic_agent_install_result.rc == 0
+          no_log: true
+
+      rescue:
+        - name: Check Elastic Agent service after installation failure
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - status
+              - elastic-agent.service
+              - --no-pager
+              - -l
+          register: elastic_agent_failed_service_status
+          changed_when: false
+          failed_when: false
+
+        - name: Read recent Elastic Agent journal after failure
+          ansible.builtin.command:
+            argv:
+              - journalctl
+              - -u
+              - elastic-agent.service
+              - --since
+              - "-10 minutes"
+              - --no-pager
+              - -n
+              - "100"
+          register: elastic_agent_failed_journal
+          changed_when: false
+          failed_when: false
+
+        - name: Display sanitized installation failure
+          ansible.builtin.debug:
+            msg:
+              - "Elastic Agent installation failed."
+              - "Host: {{ inventory_hostname }}"
+              - >-
+                Service status:
+                {{
+                  elastic_agent_failed_service_status.stdout
+                  | default('Service status unavailable')
+                }}
+              - >-
+                Recent journal:
+                {{
+                  elastic_agent_failed_journal.stdout
+                  | default('No Elastic Agent journal entries found')
+                }}
+
+        - name: Stop migration after installation failure
+          ansible.builtin.fail:
+            msg: >-
+              Elastic Agent installation failed on {{ inventory_hostname }}.
+              The enrollment token remains hidden.
+
+    - name: Display sanitized installation result
+      ansible.builtin.debug:
+        msg:
+          - "Elastic Agent installation command completed successfully."
+          - "Host: {{ inventory_hostname }}"
+          - "Fleet Server: {{ elastic_fleet_server_url }}"
+          - "Version requested: {{ elastic_agent_version }}"
+
+    # =========================================================================
+    # 14. Validate systemd service
+    # =========================================================================
+    - name: Wait for Elastic Agent service to become active
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - is-active
+          - elastic-agent.service
+      register: elastic_agent_service_active
+      changed_when: false
+      failed_when: false
+      retries: "{{ elastic_agent_health_retries }}"
+      delay: "{{ elastic_agent_health_delay }}"
+      until:
+        - elastic_agent_service_active.rc == 0
+        - elastic_agent_service_active.stdout | trim == 'active'
+
+    - name: Verify Elastic Agent service is enabled
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - is-enabled
+          - elastic-agent.service
+      register: elastic_agent_service_enabled
+      changed_when: false
+      failed_when: false
+
+    - name: Enable Elastic Agent service when required
+      ansible.builtin.systemd:
+        name: elastic-agent
+        enabled: true
+      when:
+        - elastic_agent_service_enabled.stdout | default('') | trim != 'enabled'
+
+    # =========================================================================
+    # 15. Perform a practical post-enrollment validation
+    #
+    # Elastic Agent integrations can legitimately remain STARTING or briefly
+    # report DEGRADED while Fleet finishes applying policy. For rollout
+    # purposes, require the service to be active and Fleet to connect, but do
+    # not wait for every integration component to become fully healthy.
+    # =========================================================================
+    - name: Wait briefly for Elastic Agent to connect to Fleet
+      ansible.builtin.command:
+        argv:
+          - "{{ elastic_agent_install_dir }}/elastic-agent"
+          - status
+      register: elastic_agent_status_after
+      changed_when: false
+      failed_when: false
+      retries: "{{ elastic_agent_fleet_connect_retries }}"
+      delay: "{{ elastic_agent_fleet_connect_delay }}"
+      until:
+        - >-
+          'CONNECTED' in
+          (elastic_agent_status_after.stdout | default('') | upper)
+        - >-
+          'STOPPED' not in
+          (elastic_agent_status_after.stdout | default('') | upper)
+        - >-
+          'FAILED' not in
+          (elastic_agent_status_after.stdout | default('') | upper)
+
+    - name: Display post-enrollment Agent status
+      ansible.builtin.debug:
+        msg:
+          - "Elastic Agent service is active."
+          - >-
+            Fleet connection detected:
+            {{
+              'CONNECTED' in
+              (elastic_agent_status_after.stdout | default('') | upper)
+            }}
+          - >-
+            Agent status:
+            {{ elastic_agent_status_after.stdout | default('Unavailable') }}
+
+    - name: Read installed Elastic Agent version
+      ansible.builtin.command:
+        argv:
+          - "{{ elastic_agent_install_dir }}/elastic-agent"
+          - version
+      register: elastic_agent_version_after
+      changed_when: false
+
+    - name: Validate installed Elastic Agent version
+      ansible.builtin.assert:
+        that:
+          - elastic_agent_version in elastic_agent_version_after.stdout
+        fail_msg: >-
+          Elastic Agent installed, but the reported version does not match
+          {{ elastic_agent_version }}.
+        success_msg: "Elastic Agent {{ elastic_agent_version }} is installed."
+
+    # =========================================================================
+    # 16. Revalidate Fleet Server and Elasticsearch output
+    # =========================================================================
+    - name: Verify Fleet Server remains reachable after enrollment
+      ansible.builtin.uri:
+        url: "{{ elastic_fleet_server_url }}/api/status"
+        method: GET
+        validate_certs: "{{ not elastic_agent_insecure_enrollment | bool }}"
+        return_content: true
+        status_code: 200
+        timeout: 20
+      register: elastic_fleet_status_after
+      changed_when: false
+
+    - name: Validate final Fleet Server health
+      ansible.builtin.assert:
+        that:
+          - elastic_fleet_status_after.status == 200
+          - >-
+            'HEALTHY' in
+            (elastic_fleet_status_after.content | default('') | upper)
+        fail_msg: >-
+          Elastic Agent was installed, but Fleet Server did not report healthy
+          during final validation.
+        success_msg: "Fleet Server remains healthy after enrollment."
+
+    - name: Verify Elasticsearch output remains reachable after enrollment
+      ansible.builtin.uri:
+        url: "{{ elastic_output_url }}/"
+        method: GET
+        validate_certs: "{{ elastic_output_validate_certs }}"
+        status_code: 401
+        return_content: true
+        timeout: 20
+      register: elastic_output_postcheck
+      changed_when: false
+
+    - name: Validate final Elasticsearch output reachability
+      ansible.builtin.assert:
+        that:
+          - elastic_output_postcheck.status == 401
+        fail_msg: >-
+          Elastic Agent was installed, but the Elasticsearch output is no
+          longer reachable.
+        success_msg: >-
+          Elasticsearch output remains reachable after enrollment.
+
+    # =========================================================================
+    # 17. Display final migration result
+    # =========================================================================
+    - name: Display migration result
+      ansible.builtin.debug:
+        msg:
+          - "Host: {{ inventory_hostname }}"
+          - "Result: MIGRATION SUCCESSFUL"
+          - "OS: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Architecture: {{ ansible_architecture }}"
+          - "Previous installation type: {{ elastic_agent_installation_type }}"
+          - >-
+            Installed version:
+            {{ elastic_agent_version_after.stdout | trim }}
+          - "Service: {{ elastic_agent_service_active.stdout | trim }}"
+          - "Fleet Server: {{ elastic_fleet_server_url }}"
+          - "Elasticsearch output: {{ elastic_output_url }}"
+          - "Fleet connectivity: HEALTHY"
+          - "Elasticsearch output connectivity: PASS"
+          - >-
+            Post-enrollment Agent status:
+            {{ elastic_agent_status_after.stdout }}
+
+  post_tasks:
+    # =========================================================================
+    # 18. Remove staging files after successful Fleet enrollment
+    # =========================================================================
+    - name: Remove Elastic Agent staging directory after successful enrollment
+      ansible.builtin.file:
+        path: "{{ elastic_agent_staging_dir }}"
+        state: absent
+      when:
+        - elastic_agent_remove_staging_after_success | bool
+        - elastic_agent_status_after is defined
+        - >-
+          'CONNECTED' in
+          (elastic_agent_status_after.stdout | default('') | upper)
+        - >-
+          'FAILED' not in
+          (elastic_agent_status_after.stdout | default('') | upper)
+        - >-
+          'STOPPED' not in
+          (elastic_agent_status_after.stdout | default('') | upper)

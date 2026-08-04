@@ -1,0 +1,53 @@
+---
+# =============================================================================
+# Elastic Agent migration settings
+# =============================================================================
+
+elastic_agent_version: "9.4.4"
+
+# Fleet Server endpoint used by enrolled lab agents.
+elastic_fleet_server_url: "https://elastic.cloudandlinux.com:8220"
+elastic_fleet_server_host: "elastic.cloudandlinux.com"
+elastic_fleet_server_port: 8220
+
+# Quick Start generated a self-signed Fleet Server certificate.
+# Change this to false after installing a certificate trusted by all clients.
+elastic_agent_insecure_enrollment: true
+
+# Reinstall is intentionally enabled for the migration run.
+# Change to false after all systems have been migrated.
+elastic_agent_force_reinstall: true
+
+# Remove residual configuration only after the supported uninstall has run.
+elastic_agent_remove_residual_state: true
+
+# Download location on Elastic's official artifact repository.
+elastic_agent_artifact_base_url: >-
+  https://artifacts.elastic.co/downloads/beats/elastic-agent
+
+# Remote staging directory.
+elastic_agent_staging_dir: "/var/tmp/elastic-agent-migration"
+
+# Standard native installation location.
+elastic_agent_install_dir: "/opt/Elastic/Agent"
+
+# Supported architecture translation.
+elastic_agent_architecture_map:
+  x86_64: "x86_64"
+  amd64: "x86_64"
+  aarch64: "arm64"
+  arm64: "arm64"
+
+# Families currently accepted by this lab playbook.
+elastic_agent_supported_families:
+  - Debian
+  - RedHat
+  - Suse
+
+# Permit the older lab distributions but generate an explicit warning.
+elastic_agent_legacy_os_allowed: true
+
+# Restart and validation timing.
+elastic_agent_start_timeout: 180
+elastic_agent_health_retries: 18
+elastic_agent_health_delay: 10

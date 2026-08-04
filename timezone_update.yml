@@ -1,0 +1,32 @@
+---
+- name: Configure system timezone
+  hosts: unix_servers
+  become: true
+  gather_facts: false
+
+  vars:
+    timezone_name: "America/New_York"
+
+  tasks:
+    - name: Read current timezone
+      ansible.builtin.command:
+        cmd: timedatectl show --property=Timezone --value
+      register: current_timezone
+      changed_when: false
+
+    - name: Set timezone
+      ansible.builtin.command:
+        cmd: timedatectl set-timezone {{ timezone_name }}
+      when: current_timezone.stdout | trim != timezone_name
+
+    - name: Verify timezone
+      ansible.builtin.command:
+        cmd: timedatectl show --property=Timezone --value
+      register: configured_timezone
+      changed_when: false
+
+    - name: Display timezone result
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }} timezone is
+          {{ configured_timezone.stdout | trim }}

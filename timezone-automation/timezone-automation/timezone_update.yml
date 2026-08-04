@@ -1,0 +1,39 @@
+---
+- name: Configure system timezone
+  hosts: ubuntu
+  gather_facts: false
+  become: true
+
+  vars:
+    expected_timezone: "America/New_York"
+
+  tasks:
+    - name: Read current timezone
+      ansible.builtin.command:
+        cmd: timedatectl show --property=Timezone --value
+      register: timezone_before
+      changed_when: false
+
+    - name: Set timezone when required
+      ansible.builtin.command:
+        cmd: "timedatectl set-timezone {{ expected_timezone }}"
+      when: timezone_before.stdout | trim != expected_timezone
+      register: timezone_set
+      changed_when: timezone_set.rc == 0
+
+    - name: Read configured timezone
+      ansible.builtin.command:
+        cmd: timedatectl show --property=Timezone --value
+      register: timezone_after
+      changed_when: false
+
+    - name: Validate timezone
+      ansible.builtin.assert:
+        that:
+          - timezone_after.stdout | trim == expected_timezone
+        success_msg: >-
+          {{ inventory_hostname }} timezone is
+          {{ timezone_after.stdout | trim }}
+        fail_msg: >-
+          {{ inventory_hostname }} expected {{ expected_timezone }},
+          but returned {{ timezone_after.stdout | trim }}

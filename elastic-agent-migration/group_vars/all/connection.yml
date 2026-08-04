@@ -1,0 +1,13 @@
+---
+# =============================================================================
+# Shared Ansible connection settings
+# Values are sourced from the encrypted group_vars/all/vault.yml file.
+# =============================================================================
+
+ansible_user: freddygonzalez
+
+ansible_password: "{{ vault_lab_ssh_password }}"
+
+ansible_become: true
+ansible_become_method: sudo
+ansible_become_password: "{{ vault_lab_become_password }}"
