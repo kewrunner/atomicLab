@@ -10,20 +10,20 @@
 
   tasks:
     - name: Read initial /proc/loadavg
-      ansible.builtin.slurp:
-        src: /proc/loadavg
+      ansible.builtin.raw: cat /proc/loadavg
       register: _load_start
+      changed_when: false
 
     - name: Parse initial load averages
       ansible.builtin.set_fact:
         load_start: >-
           {{
             {
-              'timestamp': ansible_date_time.iso8601 if (ansible_date_time is defined) else '',
-              'raw': (_load_start.content | b64decode | trim),
-              'avg_1':  (_load_start.content | b64decode | trim).split()[0] | float,
-              'avg_5':  (_load_start.content | b64decode | trim).split()[1] | float,
-              'avg_15': (_load_start.content | b64decode | trim).split()[2] | float
+              'timestamp': '',
+              'raw': (_load_start.stdout | trim),
+              'avg_1':  (_load_start.stdout | trim).split()[0] | float,
+              'avg_5':  (_load_start.stdout | trim).split()[1] | float,
+              'avg_15': (_load_start.stdout | trim).split()[2] | float
             }
           }}
 
@@ -32,20 +32,20 @@
         minutes: "{{ observe_minutes }}"
 
     - name: Read final /proc/loadavg
-      ansible.builtin.slurp:
-        src: /proc/loadavg
+      ansible.builtin.raw: cat /proc/loadavg
       register: _load_end
+      changed_when: false
 
     - name: Parse final load averages
       ansible.builtin.set_fact:
         load_end: >-
           {{
             {
-              'timestamp': ansible_date_time.iso8601 if (ansible_date_time is defined) else '',
-              'raw': (_load_end.content | b64decode | trim),
-              'avg_1':  (_load_end.content | b64decode | trim).split()[0] | float,
-              'avg_5':  (_load_end.content | b64decode | trim).split()[1] | float,
-              'avg_15': (_load_end.content | b64decode | trim).split()[2] | float
+              'timestamp': '',
+              'raw': (_load_end.stdout | trim),
+              'avg_1':  (_load_end.stdout | trim).split()[0] | float,
+              'avg_5':  (_load_end.stdout | trim).split()[1] | float,
+              'avg_15': (_load_end.stdout | trim).split()[2] | float
             }
           }}
 
