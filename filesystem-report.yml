@@ -1,105 +1,72 @@
 ---
-- name: Filesystem report and largest files under /home (Ubuntu / RHEL / CentOS)
+- name: Filesystem report and largest files under /home
   hosts: all
+  gather_facts: false
   become: true
   become_method: sudo
-  gather_facts: yes
 
   vars:
     home_path: /home
     top_n: 20
 
   tasks:
-    - name: Collect filesystem usage (df -h)
-      ansible.builtin.command:
-        argv: [df, -h]
-      register: df_out
+    - name: Generate filesystem report
+      ansible.builtin.raw: |
+        HOME_PATH="{{ home_path }}"
+        TOP_N="{{ top_n }}"
+        REPORT="/tmp/fs_report_{{ inventory_hostname }}.txt"
+
+        {
+          echo "Host: {{ inventory_hostname }}"
+          echo "Date: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+          echo
+
+          echo "=== Filesystems (df -h) ==="
+          df -h
+          echo
+
+          echo "=== Block Devices (lsblk) ==="
+
+          if lsblk -f -o 'NAME,FSTYPE,SIZE,FSUSE%,MOUNTPOINTS,UUID' >/dev/null 2>&1; then
+            lsblk -f -o 'NAME,FSTYPE,SIZE,FSUSE%,MOUNTPOINTS,UUID'
+
+          elif lsblk -f -o 'NAME,FSTYPE,SIZE,MOUNTPOINT,UUID' >/dev/null 2>&1; then
+            lsblk -f -o 'NAME,FSTYPE,SIZE,MOUNTPOINT,UUID'
+
+          elif lsblk -f -o 'NAME,FSTYPE,SIZE' >/dev/null 2>&1; then
+            lsblk -f -o 'NAME,FSTYPE,SIZE'
+
+          else
+            echo "lsblk failed"
+          fi
+
+          echo
+          echo "=== Largest ${TOP_N} files under ${HOME_PATH} (bytes path) ==="
+
+          if [ -d "$HOME_PATH" ]; then
+            find "$HOME_PATH" \
+              \( \
+                -path '*/.cache/*' -o \
+                -path '*/.minikube/*' -o \
+                -path '*/node_modules/*' \
+              \) -prune -o \
+              -type f \
+              ! -name '*.tmp' \
+              ! -name '*.swp' \
+              -printf '%s\t%p\n' 2>/dev/null |
+              sort -nr |
+              head -n "$TOP_N"
+          else
+            echo "${HOME_PATH} does not exist"
+          fi
+
+        } | tee "$REPORT"
+
+        echo
+        echo "REPORT_PATH=$REPORT"
+      register: fs_report
       changed_when: false
 
-    # Try modern util-linux first (FSUSE% + MOUNTPOINTS)
-    - name: Try lsblk with modern columns
-      ansible.builtin.command:
-        argv: [lsblk, -f, -o, NAME,FSTYPE,SIZE,FSUSE%,MOUNTPOINTS,UUID]
-      register: lsblk_try1
-      changed_when: false
-      failed_when: false
-
-    # Fallback: older lsblk (no FSUSE%, singular MOUNTPOINT)
-    - name: Try lsblk with older columns
-      ansible.builtin.command:
-        argv: [lsblk, -f, -o, NAME,FSTYPE,SIZE,MOUNTPOINT,UUID]
-      register: lsblk_try2
-      changed_when: false
-      failed_when: false
-      when: lsblk_try1.rc != 0
-
-    # Minimal fallback: very old lsblk
-    - name: Try lsblk minimal columns
-      ansible.builtin.command:
-        argv: [lsblk, -f, -o, NAME,FSTYPE,SIZE]
-      register: lsblk_try3
-      changed_when: false
-      failed_when: false
-      when: (lsblk_try1.rc != 0) and (lsblk_try2 is defined and lsblk_try2.rc != 0)
-
-    - name: Pick best lsblk output
-      ansible.builtin.set_fact:
-        lsblk_out_text: >-
-          {{
-            (lsblk_try1.stdout if lsblk_try1.rc == 0 else
-             (lsblk_try2.stdout if (lsblk_try2 is defined and lsblk_try2.rc == 0) else
-              (lsblk_try3.stdout if (lsblk_try3 is defined and lsblk_try3.rc == 0) else 'lsblk failed')))
-          }}
-
-    - name: Check if {{ home_path }} exists
-      ansible.builtin.stat:
-        path: "{{ home_path }}"
-      register: st_home
-
-    - name: Find files under {{ home_path }} (may take time on large trees)
-      when: st_home.stat.exists and st_home.stat.isdir
-      ansible.builtin.find:
-        paths: "{{ home_path }}"
-        file_type: file
-        recurse: yes
-        follow: false
-        hidden: false
-        # optional filters to skip obvious big caches; tweak as needed
-        excludes:
-          - "*.tmp"
-          - "*.swp"
-          - "*.cache/*"
-          - ".minikube/*"
-          - "node_modules/*"
-      register: found_home
-
-    - name: Compute top {{ top_n }} largest files
-      ansible.builtin.set_fact:
-        largest_files: >-
-          {{ (found_home.files | sort(attribute='size', reverse=True))[:top_n]
-             if (found_home is defined and found_home.files is defined) else [] }}
-
-    - name: Write consolidated report to /tmp
-      ansible.builtin.copy:
-        dest: "/tmp/fs_report_{{ inventory_hostname }}.txt"
-        mode: "0644"
-        content: |
-          Host: {{ inventory_hostname }}
-          Date: {{ ansible_date_time.date }} {{ ansible_date_time.time }}
-
-          === Filesystems (df -h) ===
-          {{ df_out.stdout | default('') }}
-
-          === Block Devices (lsblk) ===
-          {{ lsblk_out_text | default('') }}
-
-          === Largest {{ top_n }} files under {{ home_path }} (bytes \t path) ===
-          {% for f in largest_files %}
-          {{ '%d' | format(f.size | int) }}	{{ f.path }}
-          {% endfor %}
-
-    - name: Show where the report was saved
+    - name: Show filesystem report
       ansible.builtin.debug:
-        msg:
-          - "Report saved to /tmp/fs_report_{{ inventory_hostname }}.txt"
-          - "Top {{ top_n }} largest files under {{ home_path }} gathered: {{ largest_files | length }} item(s)."
+        var: fs_report.stdout_lines
