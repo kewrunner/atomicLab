@@ -6,29 +6,55 @@
 
   tasks:
     - name: Confirm SSH login identity
-      ansible.builtin.command: whoami
+      ansible.builtin.raw: whoami
       register: whoami_result
       changed_when: false
 
     - name: Show SSH login identity
       ansible.builtin.debug:
-        msg: "Connected as {{ whoami_result.stdout }}"
+        msg: "Connected as {{ whoami_result.stdout | trim }}"
 
     - name: Confirm sudo works
-      ansible.builtin.command: whoami
+      ansible.builtin.raw: whoami
       become: true
       register: sudo_whoami_result
       changed_when: false
 
     - name: Show sudo identity
       ansible.builtin.debug:
-        msg: "Become user is {{ sudo_whoami_result.stdout }}"
+        msg: "Become user is {{ sudo_whoami_result.stdout | trim }}"
 
-    - name: Gather minimal facts after sudo check
-      ansible.builtin.setup:
-        gather_subset:
-          - min
+    - name: Read operating system release
+      ansible.builtin.raw: cat /etc/os-release
+      register: os_release_result
+      changed_when: false
+
+    - name: Detect package manager
+      ansible.builtin.raw: |
+        if command -v dnf >/dev/null 2>&1; then
+          echo dnf
+        elif command -v yum >/dev/null 2>&1; then
+          echo yum
+        elif command -v apt-get >/dev/null 2>&1; then
+          echo apt
+        elif command -v zypper >/dev/null 2>&1; then
+          echo zypper
+        else
+          echo unknown
+        fi
+      register: pkg_mgr_result
+      changed_when: false
+
+    - name: Read OS name
+      ansible.builtin.raw: |
+        . /etc/os-release
+        printf '%s %s\n' "${NAME:-unknown}" "${VERSION_ID:-unknown}"
+      register: os_summary_result
+      changed_when: false
 
     - name: Show OS summary
       ansible.builtin.debug:
-        msg: "{{ inventory_hostname }} | {{ ansible_distribution }} {{ ansible_distribution_version }} | pkg_mgr={{ ansible_pkg_mgr | default('unknown') }}"
+        msg: >-
+          {{ inventory_hostname }} |
+          {{ os_summary_result.stdout | trim }} |
+          pkg_mgr={{ pkg_mgr_result.stdout | trim }}
