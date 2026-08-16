@@ -1,0 +1,144 @@
+---
+# Restart and validate Wazuh server services
+#
+# Purpose:
+#   Restart the core Wazuh server stack in dependency order and verify
+#   each service returns to an active/running state.
+#
+# Services:
+#   - wazuh-indexer.service
+#   - wazuh-indexer-performance-analyzer.service
+#   - wazuh-manager.service
+#   - wazuh-dashboard.service
+#
+# Behavior:
+#   - Verifies all expected services exist before making changes
+#   - Restarts services sequentially
+#   - Retries a failed restart up to 3 times
+#   - Waits between restart operations
+#   - Performs final service validation
+#   - Does not install/remove packages
+#   - Does not modify Wazuh configuration
+#
+
+- name: Restart and validate Wazuh server services
+  hosts: lab-ubuntu22-wazo-wazuh-605-103
+  gather_facts: false
+  become: true
+
+  vars:
+    wazuh_services:
+      - wazuh-indexer.service
+      - wazuh-indexer-performance-analyzer.service
+      - wazuh-manager.service
+      - wazuh-dashboard.service
+
+    wazuh_restart_retries: 3
+    wazuh_restart_delay: 15
+    wazuh_service_pause: 10
+
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # 1. Gather current service state
+    # -------------------------------------------------------------------------
+
+    - name: Gather service information
+      ansible.builtin.service_facts:
+
+    # -------------------------------------------------------------------------
+    # 2. Validate required Wazuh services
+    # -------------------------------------------------------------------------
+
+    - name: Verify required Wazuh services are installed
+      ansible.builtin.assert:
+        that:
+          - item in ansible_facts.services
+        fail_msg: "Required Wazuh service {{ item }} is not installed."
+        success_msg: "Found Wazuh service {{ item }}."
+      loop: "{{ wazuh_services }}"
+      loop_control:
+        label: "{{ item }}"
+
+    # -------------------------------------------------------------------------
+    # 3. Display current state
+    # -------------------------------------------------------------------------
+
+    - name: Display current Wazuh service status
+      ansible.builtin.debug:
+        msg: "{{ item }} = {{ ansible_facts.services[item].state }}"
+      loop: "{{ wazuh_services }}"
+      loop_control:
+        label: "{{ item }}"
+
+    # -------------------------------------------------------------------------
+    # 4. Restart Wazuh services sequentially
+    # -------------------------------------------------------------------------
+
+    - name: Restart Wazuh services
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: restarted
+      register: wazuh_restart_result
+      retries: "{{ wazuh_restart_retries }}"
+      delay: "{{ wazuh_restart_delay }}"
+      until:
+        - wazuh_restart_result.status is defined
+        - wazuh_restart_result.status.ActiveState | default('unknown') == 'active'
+      failed_when: false
+      loop: "{{ wazuh_services }}"
+      loop_control:
+        label: "{{ item }}"
+        pause: "{{ wazuh_service_pause }}"
+
+    # -------------------------------------------------------------------------
+    # 5. Gather service state after restart
+    # -------------------------------------------------------------------------
+
+    - name: Refresh service information
+      ansible.builtin.service_facts:
+
+    # -------------------------------------------------------------------------
+    # 6. Display final Wazuh service status
+    # -------------------------------------------------------------------------
+
+    - name: Display final Wazuh service status
+      ansible.builtin.debug:
+        msg:
+          - "Service: {{ item }}"
+          - "State:   {{ ansible_facts.services[item].state | default('UNKNOWN') }}"
+          - "Status:  {{ ansible_facts.services[item].status | default('UNKNOWN') }}"
+      loop: "{{ wazuh_services }}"
+      loop_control:
+        label: "{{ item }}"
+
+    # -------------------------------------------------------------------------
+    # 7. Final validation
+    # -------------------------------------------------------------------------
+
+    - name: Verify all Wazuh services are running
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services[item].state == 'running'
+        fail_msg: "FAILED: {{ item }} is not running."
+        success_msg: "PASS: {{ item }} is running."
+      loop: "{{ wazuh_services }}"
+      loop_control:
+        label: "{{ item }}"
+
+    # -------------------------------------------------------------------------
+    # 8. Final summary
+    # -------------------------------------------------------------------------
+
+    - name: Display Wazuh stack health summary
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "WAZUH SERVER HEALTH"
+          - "============================================================"
+          - "Host: {{ inventory_hostname }}"
+          - "Indexer: {{ ansible_facts.services['wazuh-indexer.service'].state }}"
+          - "Indexer Performance Analyzer: {{ ansible_facts.services['wazuh-indexer-performance-analyzer.service'].state }}"
+          - "Manager: {{ ansible_facts.services['wazuh-manager.service'].state }}"
+          - "Dashboard: {{ ansible_facts.services['wazuh-dashboard.service'].state }}"
+          - "============================================================"
