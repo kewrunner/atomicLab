@@ -1,0 +1,437 @@
+---
+# Check Elasticsearch health
+#
+# Purpose:
+#   Perform a read-only health check of Elasticsearch.
+#
+# Checks:
+#   - Host responds over SSH/Ansible
+#   - elasticsearch.service is active
+#   - Elasticsearch HTTPS API responds
+#   - Elasticsearch cluster health
+#   - Number of nodes
+#   - Active primary shards
+#   - Active shards
+#   - Unassigned shards
+#
+# Health policy:
+#   GREEN  = HEALTHY
+#   YELLOW = DEGRADED
+#   RED    = UNHEALTHY
+#
+# AWX compatibility:
+#   - gather_facts disabled
+#   - remote collection uses ansible.builtin.raw
+#   - does not depend on remote Ansible Python modules
+#
+# This playbook:
+#   - Does not restart Elasticsearch
+#   - Does not modify configuration
+#   - Does not install/remove packages
+#
+
+- name: Check Elasticsearch health
+  hosts: all
+  gather_facts: false
+  become: true
+
+  vars:
+
+    # Elasticsearch local API
+    elasticsearch_url: "https://127.0.0.1:9200"
+
+    # Authentication
+    elasticsearch_username: "elastic"
+    elasticsearch_password: "{{ vault_elasticsearch_password | default('') }}"
+
+    # Set true when Elasticsearch uses a trusted CA certificate.
+    # false uses curl -k, appropriate for the current lab/self-signed setup.
+    elasticsearch_validate_certs: false
+
+    # A single-node Elasticsearch deployment can commonly report YELLOW
+    # when replica shards cannot be allocated.
+    #
+    # true:
+    #   GREEN  -> pass
+    #   YELLOW -> pass, but report DEGRADED
+    #   RED    -> fail
+    #
+    # false:
+    #   only GREEN passes
+    elasticsearch_allow_yellow: true
+
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # 1. Elasticsearch health collection
+    # -------------------------------------------------------------------------
+
+    - name: Check Elasticsearch service and cluster health
+      ansible.builtin.raw: |
+        bash -s <<'ELASTICSEARCH_HEALTH'
+
+        # ---------------------------------------------------------------------
+        # Configuration
+        # ---------------------------------------------------------------------
+
+        ES_SERVICE="elasticsearch.service"
+        ES_URL="{{ elasticsearch_url }}"
+        ES_USER="{{ elasticsearch_username }}"
+
+        ES_PASSWORD_B64="{{ elasticsearch_password | b64encode }}"
+
+        VALIDATE_CERTS="{{ elasticsearch_validate_certs | bool | ternary('true', 'false') }}"
+        ALLOW_YELLOW="{{ elasticsearch_allow_yellow | bool | ternary('true', 'false') }}"
+
+        ES_PASSWORD="$(
+          printf '%s' "${ES_PASSWORD_B64}" |
+          base64 --decode
+        )"
+
+        HEALTH_FILE="$(mktemp)"
+
+        trap 'rm -f "${HEALTH_FILE}"' EXIT
+
+        # ---------------------------------------------------------------------
+        # System information
+        # ---------------------------------------------------------------------
+
+        HOSTNAME_SHORT="$(
+          hostname -s 2>/dev/null ||
+          hostname
+        )"
+
+        LOCAL_IP="$(
+          hostname -I 2>/dev/null |
+          awk '{print $1}'
+        )"
+
+        if [[ -z "${LOCAL_IP}" ]]; then
+          LOCAL_IP="UNKNOWN"
+        fi
+
+        UPTIME_SECONDS="$(
+          awk '{print int($1)}' /proc/uptime 2>/dev/null
+        )"
+
+        if [[ -z "${UPTIME_SECONDS}" ]]; then
+
+          UPTIME_DISPLAY="UNKNOWN"
+
+        elif (( UPTIME_SECONDS < 86400 )); then
+
+          UPTIME_DISPLAY="$(
+            awk -v seconds="${UPTIME_SECONDS}" \
+              'BEGIN {printf "%.1f hours", seconds / 3600}'
+          )"
+
+        else
+
+          UPTIME_DISPLAY="$(
+            awk -v seconds="${UPTIME_SECONDS}" \
+              'BEGIN {printf "%.1f days", seconds / 86400}'
+          )"
+
+        fi
+
+        # ---------------------------------------------------------------------
+        # Header
+        # ---------------------------------------------------------------------
+
+        echo "============================================================"
+        echo "ELASTICSEARCH HEALTH REPORT"
+        echo "============================================================"
+
+        echo "Host: ${HOSTNAME_SHORT}"
+        echo "IP: ${LOCAL_IP}"
+        echo "System responding: YES"
+        echo "Uptime: ${UPTIME_DISPLAY}"
+
+        echo
+
+        # ---------------------------------------------------------------------
+        # Check Elasticsearch service
+        # ---------------------------------------------------------------------
+
+        echo "ELASTICSEARCH SERVICE"
+        echo "------------------------------------------------------------"
+
+        SERVICE_LOAD_STATE="$(
+          systemctl show \
+            "${ES_SERVICE}" \
+            --property=LoadState \
+            --value \
+            2>/dev/null
+        )"
+
+        SERVICE_ACTIVE_STATE="$(
+          systemctl is-active \
+            "${ES_SERVICE}" \
+            2>/dev/null
+        )"
+
+        if [[ "${SERVICE_LOAD_STATE}" != "loaded" ]]; then
+
+          echo "Service: ${ES_SERVICE}"
+          echo "Installed: NO"
+          echo "State: NOT INSTALLED"
+
+          echo
+          echo "Overall health: UNHEALTHY"
+
+          exit 1
+
+        fi
+
+        echo "Service: ${ES_SERVICE}"
+        echo "Installed: YES"
+        echo "State: ${SERVICE_ACTIVE_STATE:-UNKNOWN}"
+
+        if [[ "${SERVICE_ACTIVE_STATE}" != "active" ]]; then
+
+          echo
+          echo "Overall health: UNHEALTHY"
+
+          exit 1
+
+        fi
+
+        # ---------------------------------------------------------------------
+        # Build curl options
+        # ---------------------------------------------------------------------
+
+        CURL_OPTIONS=(
+          --silent
+          --show-error
+          --connect-timeout 5
+          --max-time 20
+        )
+
+        if [[ "${VALIDATE_CERTS}" != "true" ]]; then
+          CURL_OPTIONS+=(--insecure)
+        fi
+
+        if [[ -n "${ES_PASSWORD}" ]]; then
+          CURL_OPTIONS+=(
+            --user
+            "${ES_USER}:${ES_PASSWORD}"
+          )
+        fi
+
+        # ---------------------------------------------------------------------
+        # Elasticsearch Cluster Health API
+        # ---------------------------------------------------------------------
+
+        echo
+        echo "ELASTICSEARCH API"
+        echo "------------------------------------------------------------"
+
+        HTTP_CODE="$(
+          curl \
+            "${CURL_OPTIONS[@]}" \
+            --output "${HEALTH_FILE}" \
+            --write-out '%{http_code}' \
+            "${ES_URL}/_cluster/health?filter_path=cluster_name,status,number_of_nodes,number_of_data_nodes,active_primary_shards,active_shards,unassigned_shards"
+        )"
+
+        CURL_RC=$?
+
+        echo "URL: ${ES_URL}"
+        echo "HTTP status: ${HTTP_CODE:-UNKNOWN}"
+
+        # ---------------------------------------------------------------------
+        # Curl/network failure
+        # ---------------------------------------------------------------------
+
+        if (( CURL_RC != 0 )); then
+
+          echo "API reachable: NO"
+          echo
+          echo "Overall health: UNHEALTHY"
+
+          exit 1
+
+        fi
+
+        # ---------------------------------------------------------------------
+        # Authentication / HTTP failure
+        # ---------------------------------------------------------------------
+
+        if [[ "${HTTP_CODE}" != "200" ]]; then
+
+          echo "API reachable: YES"
+
+          if [[ "${HTTP_CODE}" == "401" ]]; then
+            echo "API authentication: FAILED"
+          else
+            echo "API request: FAILED"
+          fi
+
+          echo
+          echo "Overall health: UNHEALTHY"
+
+          exit 1
+
+        fi
+
+        echo "API reachable: YES"
+        echo "API authentication: PASS"
+
+        # ---------------------------------------------------------------------
+        # Parse cluster health response
+        # ---------------------------------------------------------------------
+
+        CLUSTER_NAME="$(
+          grep -oE '"cluster_name":"[^"]+"' "${HEALTH_FILE}" |
+          head -1 |
+          cut -d':' -f2- |
+          tr -d '"'
+        )"
+
+        CLUSTER_STATUS="$(
+          grep -oE '"status":"[^"]+"' "${HEALTH_FILE}" |
+          head -1 |
+          cut -d':' -f2 |
+          tr -d '"'
+        )"
+
+        NUMBER_OF_NODES="$(
+          grep -oE '"number_of_nodes":[0-9]+' "${HEALTH_FILE}" |
+          head -1 |
+          cut -d':' -f2
+        )"
+
+        NUMBER_OF_DATA_NODES="$(
+          grep -oE '"number_of_data_nodes":[0-9]+' "${HEALTH_FILE}" |
+          head -1 |
+          cut -d':' -f2
+        )"
+
+        ACTIVE_PRIMARY_SHARDS="$(
+          grep -oE '"active_primary_shards":[0-9]+' "${HEALTH_FILE}" |
+          head -1 |
+          cut -d':' -f2
+        )"
+
+        ACTIVE_SHARDS="$(
+          grep -oE '"active_shards":[0-9]+' "${HEALTH_FILE}" |
+          head -1 |
+          cut -d':' -f2
+        )"
+
+        UNASSIGNED_SHARDS="$(
+          grep -oE '"unassigned_shards":[0-9]+' "${HEALTH_FILE}" |
+          head -1 |
+          cut -d':' -f2
+        )"
+
+        # ---------------------------------------------------------------------
+        # Cluster information
+        # ---------------------------------------------------------------------
+
+        echo
+        echo "CLUSTER HEALTH"
+        echo "------------------------------------------------------------"
+
+        echo "Cluster name: ${CLUSTER_NAME:-UNKNOWN}"
+        echo "Cluster status: ${CLUSTER_STATUS:-UNKNOWN}"
+        echo "Nodes: ${NUMBER_OF_NODES:-UNKNOWN}"
+        echo "Data nodes: ${NUMBER_OF_DATA_NODES:-UNKNOWN}"
+        echo "Active primary shards: ${ACTIVE_PRIMARY_SHARDS:-UNKNOWN}"
+        echo "Active shards: ${ACTIVE_SHARDS:-UNKNOWN}"
+        echo "Unassigned shards: ${UNASSIGNED_SHARDS:-UNKNOWN}"
+
+        # ---------------------------------------------------------------------
+        # Determine overall health
+        # ---------------------------------------------------------------------
+
+        echo
+        echo "============================================================"
+        echo "FINAL HEALTH"
+        echo "============================================================"
+
+        case "${CLUSTER_STATUS}" in
+
+          green)
+
+            echo "Service health: HEALTHY"
+            echo "Cluster health: HEALTHY"
+            echo "Overall health: HEALTHY"
+
+            exit 0
+            ;;
+
+          yellow)
+
+            echo "Service health: HEALTHY"
+            echo "Cluster health: DEGRADED"
+
+            if [[ "${ALLOW_YELLOW}" == "true" ]]; then
+
+              echo "Overall health: DEGRADED"
+              echo "Result: PASS - yellow cluster status is permitted"
+
+              exit 0
+
+            else
+
+              echo "Overall health: DEGRADED"
+              echo "Result: FAIL - green cluster status required"
+
+              exit 1
+
+            fi
+            ;;
+
+          red)
+
+            echo "Service health: HEALTHY"
+            echo "Cluster health: UNHEALTHY"
+            echo "Overall health: UNHEALTHY"
+
+            exit 1
+            ;;
+
+          *)
+
+            echo "Service health: HEALTHY"
+            echo "Cluster health: UNKNOWN"
+            echo "Overall health: UNHEALTHY"
+
+            exit 1
+            ;;
+
+        esac
+
+        ELASTICSEARCH_HEALTH
+      register: elasticsearch_health_check
+      changed_when: false
+      failed_when: false
+
+    # -------------------------------------------------------------------------
+    # 2. Display Elasticsearch health report
+    # -------------------------------------------------------------------------
+
+    - name: Display Elasticsearch health report
+      ansible.builtin.debug:
+        msg: "{{ elasticsearch_health_check.stdout_lines }}"
+
+    # -------------------------------------------------------------------------
+    # 3. Fail job when Elasticsearch is unhealthy
+    # -------------------------------------------------------------------------
+
+    - name: Validate Elasticsearch health
+      ansible.builtin.fail:
+        msg: >-
+          Elasticsearch health check FAILED.
+          Review the ELASTICSEARCH HEALTH REPORT above.
+      when: elasticsearch_health_check.rc != 0
+
+    # -------------------------------------------------------------------------
+    # 4. Confirm successful health check
+    # -------------------------------------------------------------------------
+
+    - name: Confirm Elasticsearch health
+      ansible.builtin.debug:
+        msg: "PASS: Elasticsearch service and cluster health checks passed."
+      when: elasticsearch_health_check.rc == 0
