@@ -1,0 +1,294 @@
+---
+# Check Wazuh server health
+#
+# Purpose:
+#   Perform a read-only health check of the Wazuh server stack.
+#
+# Checks:
+#   - Host responds over Ansible/SSH
+#   - System uptime
+#   - wazuh-indexer.service
+#   - wazuh-indexer-performance-analyzer.service
+#   - wazuh-manager.service
+#   - wazuh-dashboard.service
+#   - Required Wazuh Manager internal processes
+#
+# AWX compatibility:
+#   - gather_facts is disabled
+#   - Remote health checks use ansible.builtin.raw
+#   - Does not require Ansible Python modules on the managed host
+#
+# This playbook:
+#   - Does not restart services
+#   - Does not install packages
+#   - Does not modify configuration
+#
+
+- name: Check Wazuh server health
+  hosts: all
+  gather_facts: false
+  become: true
+
+  tasks:
+
+    # -------------------------------------------------------------------------
+    # 1. Wazuh server health check
+    # -------------------------------------------------------------------------
+
+    - name: Check Wazuh server health
+      ansible.builtin.raw: |
+        bash -s <<'WAZUH_HEALTH'
+
+        # ---------------------------------------------------------------------
+        # Configuration
+        # ---------------------------------------------------------------------
+
+        WAZUH_CONTROL="/var/ossec/bin/wazuh-control"
+
+        WAZUH_SERVICES="
+        wazuh-indexer.service
+        wazuh-indexer-performance-analyzer.service
+        wazuh-manager.service
+        wazuh-dashboard.service
+        "
+
+        WAZUH_REQUIRED_PROCESSES="
+        wazuh-modulesd
+        wazuh-monitord
+        wazuh-logcollector
+        wazuh-remoted
+        wazuh-syscheckd
+        wazuh-analysisd
+        wazuh-execd
+        wazuh-db
+        wazuh-apid
+        "
+
+        OVERALL_HEALTH="HEALTHY"
+        FAILED_SERVICES=""
+        FAILED_PROCESSES=""
+
+        # ---------------------------------------------------------------------
+        # System information
+        # ---------------------------------------------------------------------
+
+        HOSTNAME_SHORT="$(hostname -s 2>/dev/null || hostname)"
+
+        IP_ADDRESS="$(
+          hostname -I 2>/dev/null |
+          awk '{print $1}'
+        )"
+
+        if [[ -z "${IP_ADDRESS}" ]]; then
+          IP_ADDRESS="UNKNOWN"
+        fi
+
+        UPTIME_SECONDS="$(
+          awk '{print int($1)}' /proc/uptime 2>/dev/null
+        )"
+
+        if [[ -z "${UPTIME_SECONDS}" ]]; then
+
+          UPTIME_DISPLAY="UNKNOWN"
+
+        elif (( UPTIME_SECONDS < 86400 )); then
+
+          UPTIME_DISPLAY="$(
+            awk -v seconds="${UPTIME_SECONDS}" \
+              'BEGIN {printf "%.1f hours", seconds / 3600}'
+          )"
+
+        else
+
+          UPTIME_DISPLAY="$(
+            awk -v seconds="${UPTIME_SECONDS}" \
+              'BEGIN {printf "%.1f days", seconds / 86400}'
+          )"
+
+        fi
+
+        # ---------------------------------------------------------------------
+        # Header
+        # ---------------------------------------------------------------------
+
+        echo "============================================================"
+        echo "WAZUH SERVER HEALTH REPORT"
+        echo "============================================================"
+        echo "Host: ${HOSTNAME_SHORT}"
+        echo "IP: ${IP_ADDRESS}"
+        echo "System responding: YES"
+        echo "Uptime: ${UPTIME_DISPLAY}"
+
+        if command -v python3 >/dev/null 2>&1; then
+          echo "Remote Python: $(python3 --version 2>&1)"
+        else
+          echo "Remote Python: NOT FOUND"
+        fi
+
+        echo
+        echo "SYSTEMD SERVICES"
+        echo "------------------------------------------------------------"
+
+        # ---------------------------------------------------------------------
+        # Wazuh systemd services
+        # ---------------------------------------------------------------------
+
+        for SERVICE in ${WAZUH_SERVICES}; do
+
+          LOAD_STATE="$(
+            systemctl show \
+              "${SERVICE}" \
+              --property=LoadState \
+              --value \
+              2>/dev/null
+          )"
+
+          ACTIVE_STATE="$(
+            systemctl is-active \
+              "${SERVICE}" \
+              2>/dev/null
+          )"
+
+          if [[ "${LOAD_STATE}" != "loaded" ]]; then
+
+            echo "${SERVICE}: NOT INSTALLED"
+
+            FAILED_SERVICES="${FAILED_SERVICES} ${SERVICE}"
+            OVERALL_HEALTH="UNHEALTHY"
+
+          elif [[ "${ACTIVE_STATE}" == "active" ]]; then
+
+            echo "${SERVICE}: RUNNING"
+
+          else
+
+            echo "${SERVICE}: ${ACTIVE_STATE:-UNKNOWN}"
+
+            FAILED_SERVICES="${FAILED_SERVICES} ${SERVICE}"
+            OVERALL_HEALTH="UNHEALTHY"
+
+          fi
+
+        done
+
+        # ---------------------------------------------------------------------
+        # Wazuh Manager processes
+        # ---------------------------------------------------------------------
+
+        echo
+        echo "WAZUH MANAGER PROCESSES"
+        echo "------------------------------------------------------------"
+
+        if [[ -x "${WAZUH_CONTROL}" ]]; then
+
+          WAZUH_STATUS="$(
+            "${WAZUH_CONTROL}" status 2>&1
+          )"
+
+          echo "${WAZUH_STATUS}"
+
+          # -------------------------------------------------------------------
+          # Validate only REQUIRED Wazuh processes.
+          #
+          # Optional processes such as wazuh-maild, wazuh-clusterd,
+          # wazuh-agentlessd, wazuh-integratord, etc. are informational only.
+          # -------------------------------------------------------------------
+
+          for PROCESS in ${WAZUH_REQUIRED_PROCESSES}; do
+
+            if ! grep -Fqx \
+              "${PROCESS} is running..." \
+              <<< "${WAZUH_STATUS}"; then
+
+              FAILED_PROCESSES="${FAILED_PROCESSES} ${PROCESS}"
+              OVERALL_HEALTH="UNHEALTHY"
+
+            fi
+
+          done
+
+        else
+
+          echo "${WAZUH_CONTROL}: NOT FOUND"
+
+          FAILED_PROCESSES="wazuh-control-unavailable"
+          OVERALL_HEALTH="UNHEALTHY"
+
+        fi
+
+        # ---------------------------------------------------------------------
+        # Required process health
+        # ---------------------------------------------------------------------
+
+        echo
+        echo "REQUIRED PROCESS VALIDATION"
+        echo "------------------------------------------------------------"
+
+        if [[ -z "${FAILED_PROCESSES// }" ]]; then
+
+          echo "Required Manager processes: HEALTHY"
+          echo "Failed required processes: NONE"
+
+        else
+
+          echo "Required Manager processes: UNHEALTHY"
+          echo "Failed required processes:${FAILED_PROCESSES}"
+
+        fi
+
+        # ---------------------------------------------------------------------
+        # Service health
+        # ---------------------------------------------------------------------
+
+        if [[ -z "${FAILED_SERVICES// }" ]]; then
+          FAILED_SERVICES_DISPLAY="NONE"
+        else
+          FAILED_SERVICES_DISPLAY="${FAILED_SERVICES}"
+        fi
+
+        # ---------------------------------------------------------------------
+        # Final result
+        # ---------------------------------------------------------------------
+
+        echo
+        echo "============================================================"
+        echo "FINAL HEALTH"
+        echo "============================================================"
+        echo "Failed services: ${FAILED_SERVICES_DISPLAY}"
+        echo "Overall health: ${OVERALL_HEALTH}"
+        echo "============================================================"
+
+        if [[ "${OVERALL_HEALTH}" == "HEALTHY" ]]; then
+          exit 0
+        fi
+
+        exit 1
+
+        WAZUH_HEALTH
+      register: wazuh_health_check
+      changed_when: false
+      failed_when: false
+
+    # -------------------------------------------------------------------------
+    # 2. Display complete health report
+    # -------------------------------------------------------------------------
+
+    - name: Display Wazuh server health report
+      ansible.builtin.debug:
+        msg: "{{ wazuh_health_check.stdout_lines }}"
+
+    # -------------------------------------------------------------------------
+    # 3. Final validation
+    # -------------------------------------------------------------------------
+
+    - name: Validate Wazuh server health
+      ansible.builtin.fail:
+        msg: >-
+          Wazuh server health check FAILED.
+          Review the WAZUH SERVER HEALTH REPORT above.
+      when: wazuh_health_check.rc != 0
+
+    - name: Confirm Wazuh server health
+      ansible.builtin.debug:
+        msg: "PASS: Wazuh server is healthy."
+      when: wazuh_health_check.rc == 0
