@@ -47,9 +47,12 @@
 
         WAZUH_SERVICES="
         wazuh-indexer.service
-        wazuh-indexer-performance-analyzer.service
         wazuh-manager.service
         wazuh-dashboard.service
+        "
+        
+        WAZUH_OPTIONAL_SERVICES="
+        wazuh-indexer-performance-analyzer.service
         "
 
         WAZUH_REQUIRED_PROCESSES="
@@ -246,6 +249,47 @@
           FAILED_SERVICES_DISPLAY="${FAILED_SERVICES}"
         fi
 
+        # ---------------------------------------------------------------------
+        # Optional / informational Wazuh services
+        # ---------------------------------------------------------------------
+        
+        echo
+        echo "OPTIONAL SERVICES"
+        echo "------------------------------------------------------------"
+        
+        for SERVICE in ${WAZUH_OPTIONAL_SERVICES}; do
+        
+          LOAD_STATE="$(
+            systemctl show \
+              "${SERVICE}" \
+              --property=LoadState \
+              --value \
+              2>/dev/null
+          )"
+        
+          ACTIVE_STATE="$(
+            systemctl is-active \
+              "${SERVICE}" \
+              2>/dev/null
+          )"
+        
+          if [[ "${LOAD_STATE}" != "loaded" ]]; then
+        
+            echo "${SERVICE}: NOT INSTALLED"
+        
+          elif [[ "${ACTIVE_STATE}" == "active" ]]; then
+        
+            echo "${SERVICE}: RUNNING"
+        
+          else
+        
+            echo "${SERVICE}: ${ACTIVE_STATE:-UNKNOWN}"
+        
+          fi
+        
+        done
+
+        
         # ---------------------------------------------------------------------
         # Final result
         # ---------------------------------------------------------------------
