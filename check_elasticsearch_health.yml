@@ -38,7 +38,7 @@
   vars:
 
     # Elasticsearch local API
-    elasticsearch_url: "https://127.0.0.1:9200"
+    elasticsearch_url: "https://127.0.0.1:9220"
 
     # Authentication
     elasticsearch_username: "elastic"
