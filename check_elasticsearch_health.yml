@@ -61,7 +61,24 @@
     elasticsearch_allow_yellow: true
 
   tasks:
+    # -------------------------------------------------------------------------
+    # Validate Elasticsearch credential injection
+    # -------------------------------------------------------------------------
 
+    - name: Verify Elasticsearch credential is available
+      ansible.builtin.assert:
+        that:
+          - vault_elasticsearch_password is defined
+          - vault_elasticsearch_password | length > 0
+        fail_msg: "Elasticsearch API credential was not injected."
+        success_msg: "Elasticsearch API credential is available."
+
+    - name: Display Elasticsearch credential metadata
+      ansible.builtin.debug:
+        msg:
+          - "Credential defined: {{ vault_elasticsearch_password is defined }}"
+          - "Credential length: {{ vault_elasticsearch_password | default('') | length }}"
+          
     # -------------------------------------------------------------------------
     # 1. Elasticsearch health collection
     # -------------------------------------------------------------------------
