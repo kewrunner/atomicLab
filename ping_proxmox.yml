@@ -1,10 +1,10 @@
 ---
-- name: Validate AWX connectivity to Proxmox
-  hosts: all
+- name: Validate AWX connectivity to WAZO lab through Proxmox
+  hosts: lab-rhel9-wazo-infra-jumpserver
   gather_facts: false
   become: false
 
   tasks:
 
-    - name: Ping Proxmox from AWX
+    - name: Test Ansible connectivity through Proxmox proxy
       ansible.builtin.ping:
