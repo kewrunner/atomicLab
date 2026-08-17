@@ -1,0 +1,10 @@
+---
+- name: Validate AWX connectivity to Proxmox
+  hosts: all
+  gather_facts: false
+  become: false
+
+  tasks:
+
+    - name: Ping Proxmox from AWX
+      ansible.builtin.ping:
