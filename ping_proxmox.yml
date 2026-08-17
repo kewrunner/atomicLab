@@ -1,6 +1,6 @@
 ---
 - name: Validate AWX connectivity to WAZO lab through Proxmox
-  hosts: lab-rhel9-wazo-infra-jumpserver
+  hosts: all
   gather_facts: false
   become: false
 
