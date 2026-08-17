@@ -1,0 +1,56 @@
+---
+# Deploy the AWX WAZO LAB public SSH key to the lab fleet.
+#
+# Purpose:
+#   Authorize the dedicated AWX automation key for the
+#   freddygonzalez account on all WAZO LAB systems.
+#
+# This playbook:
+#   - Does not modify SSH daemon configuration
+#   - Does not remove existing authorized keys
+#   - Adds only the AWX WAZO LAB public key
+#   - Is safe to run repeatedly
+#
+# Source key:
+#   /opt/ansible/files/awx_wazo_lab_ed25519.pub
+
+- name: Deploy AWX WAZO LAB SSH public key
+  hosts: all
+  gather_facts: false
+  become: true
+
+  vars:
+    awx_ssh_user: freddygonzalez
+    awx_public_key_file: "/opt/ansible/files/awx_wazo_lab_ed25519.pub"
+
+  tasks:
+
+    - name: Verify AWX public key exists on control node
+      ansible.builtin.stat:
+        path: "{{ awx_public_key_file }}"
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: awx_key_file
+
+    - name: Validate AWX public key file
+      ansible.builtin.assert:
+        that:
+          - awx_key_file.stat.exists
+          - awx_key_file.stat.isreg
+        fail_msg: "AWX public key file {{ awx_public_key_file }} was not found."
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Verify AWX automation user exists
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ awx_ssh_user }}"
+
+    - name: Authorize AWX WAZO LAB public key
+      ansible.posix.authorized_key:
+        user: "{{ awx_ssh_user }}"
+        key: "{{ lookup('ansible.builtin.file', awx_public_key_file) }}"
+        state: present
+        manage_dir: true
