@@ -9,11 +9,16 @@
     load_end: {}
 
   tasks:
+
+    # UPDATED BLOCK 1
     - name: Read initial /proc/loadavg
       ansible.builtin.raw: cat /proc/loadavg
       register: _load_start
       changed_when: false
+      ignore_errors: true
+      ignore_unreachable: true
 
+    # UPDATED BLOCK 2
     - name: Parse initial load averages
       ansible.builtin.set_fact:
         load_start: >-
@@ -26,16 +31,24 @@
               'avg_15': (_load_start.stdout | trim).split()[2] | float
             }
           }}
+      when:
+        - not (_load_start.unreachable | default(false) | bool)
+        - not (_load_start.failed | default(false) | bool)
+        - _load_start.rc | default(0) | int == 0
 
     - name: Wait for {{ observe_minutes }} minutes
       ansible.builtin.pause:
         minutes: "{{ observe_minutes }}"
 
+    # UPDATED BLOCK 3
     - name: Read final /proc/loadavg
       ansible.builtin.raw: cat /proc/loadavg
       register: _load_end
       changed_when: false
+      ignore_errors: true
+      ignore_unreachable: true
 
+    # UPDATED BLOCK 4
     - name: Parse final load averages
       ansible.builtin.set_fact:
         load_end: >-
@@ -48,9 +61,32 @@
               'avg_15': (_load_end.stdout | trim).split()[2] | float
             }
           }}
+      when:
+        - not (_load_end.unreachable | default(false) | bool)
+        - not (_load_end.failed | default(false) | bool)
+        - _load_end.rc | default(0) | int == 0
 
-    - name: Report start vs end (3-minute observation)
+    # UPDATED BLOCK 5
+    - name: Report CPU load observation result
       ansible.builtin.debug:
         msg:
+          host: "{{ inventory_hostname }}"
+          status: >-
+            {{
+              'PASSED'
+              if (load_start | length > 0 and load_end | length > 0)
+              else 'FAILED'
+            }}
           started: "{{ load_start }}"
           ended: "{{ load_end }}"
+          detail: >-
+            {{
+              'CPU load observation completed successfully'
+              if (load_start | length > 0 and load_end | length > 0)
+              else
+                _load_start.msg
+                | default(
+                    _load_end.msg
+                    | default('CPU load observation incomplete')
+                  )
+            }}
