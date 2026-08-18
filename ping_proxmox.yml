@@ -11,7 +11,31 @@
         printf 'AWX_PROXY_OK host=%s user=%s\n' "$(hostname)" "$(id -un)"
       register: awx_proxy_test
       changed_when: false
+      ignore_errors: true
+      ignore_unreachable: true
 
-    - name: Display proxy connectivity result
+    - name: Report proxy connectivity result
       ansible.builtin.debug:
-        var: awx_proxy_test.stdout_lines
+        msg:
+          - "HOST: {{ inventory_hostname }}"
+          - >-
+            STATUS: {{
+              'FAILED'
+              if (
+                awx_proxy_test.unreachable | default(false) | bool
+                or awx_proxy_test.failed | default(false) | bool
+                or awx_proxy_test.rc | default(0) | int != 0
+              )
+              else 'PASSED'
+            }}
+          - >-
+            DETAIL: {{
+              awx_proxy_test.msg
+              | default(
+                  awx_proxy_test.stdout
+                  | default(
+                      awx_proxy_test.stderr
+                      | default('No result returned')
+                    )
+                )
+            }}
