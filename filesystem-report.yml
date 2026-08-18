@@ -10,13 +10,14 @@
     top_n: 20
 
   tasks:
+
     - name: Generate filesystem report
       ansible.builtin.raw: |
         HOME_PATH="{{ home_path }}"
         TOP_N="{{ top_n }}"
-        REPORT="/tmp/fs_report_{{ inventory_hostname }}.txt"
+        REPORT="/tmp/fs_report_{{ inventory_hostname }}_$(date '+%Y%m%d_%H%M%S').txt"
 
-        {
+        if ! {
           echo "Host: {{ inventory_hostname }}"
           echo "Date: $(date '+%Y-%m-%d %H:%M:%S %Z')"
           echo
@@ -60,13 +61,45 @@
             echo "${HOME_PATH} does not exist"
           fi
 
-        } | tee "$REPORT"
+        } | tee "$REPORT"; then
+          echo "ERROR: Failed to generate filesystem report" >&2
+          exit 1
+        fi
 
         echo
         echo "REPORT_PATH=$REPORT"
       register: fs_report
       changed_when: false
+      ignore_errors: true
+      ignore_unreachable: true
+
+    - name: Report filesystem collection status
+      ansible.builtin.debug:
+        msg:
+          - "HOST: {{ inventory_hostname }}"
+          - >-
+            STATUS: {{
+              'FAILED'
+              if (
+                fs_report.unreachable | default(false) | bool
+                or fs_report.failed | default(false) | bool
+                or fs_report.rc | default(0) | int != 0
+              )
+              else 'PASSED'
+            }}
+          - >-
+            DETAIL: {{
+              fs_report.msg
+              | default(
+                  fs_report.stderr
+                  | default('Filesystem report completed successfully')
+                )
+            }}
 
     - name: Show filesystem report
       ansible.builtin.debug:
         var: fs_report.stdout_lines
+      when:
+        - not (fs_report.unreachable | default(false) | bool)
+        - not (fs_report.failed | default(false) | bool)
+        - fs_report.rc | default(0) | int == 0
