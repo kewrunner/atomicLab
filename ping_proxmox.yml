@@ -6,5 +6,12 @@
 
   tasks:
 
-    - name: Test Ansible connectivity through Proxmox proxy
-      ansible.builtin.ping:
+    - name: Validate SSH connectivity through Proxmox proxy
+      ansible.builtin.raw: |
+        printf 'AWX_PROXY_OK host=%s user=%s\n' "$(hostname)" "$(id -un)"
+      register: awx_proxy_test
+      changed_when: false
+
+    - name: Display proxy connectivity result
+      ansible.builtin.debug:
+        var: awx_proxy_test.stdout_lines
