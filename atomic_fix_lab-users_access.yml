@@ -11,7 +11,7 @@
       - _aapautomate
       - freddygonzalez
 
-    lab_password: "W3lc0m32026!"
+    lab_password: "******************"
 
   pre_tasks:
     - name: Confirm become is actually root
