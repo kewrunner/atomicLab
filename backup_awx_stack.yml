@@ -1,0 +1,775 @@
+---
+# AWX full-stack backup and weekly scheduler
+#
+# Purpose:
+#   Create a restorable AWX stack backup on the Docker host and optionally
+#   schedule the same playbook to run weekly using cron.
+#
+# Design:
+#   - Runs locally on the AWX Docker host.
+#   - Does not require community.docker or other external Ansible collections.
+#   - Quiesces AWX before PostgreSQL/volume capture.
+#   - Uses block/rescue/always so AWX services are restarted on failure.
+#   - Keeps only completed .tar.gz restore points; staging data is removed.
+#   - Retention cleanup is applied only after a successful backup.
+#
+# Recommended usage:
+#
+#   Manual backup:
+#     ansible-playbook -i localhost, -c local backup_awx_stack.yml --tags backup
+#
+#   Install weekly schedule only:
+#     ansible-playbook -i localhost, -c local backup_awx_stack.yml --tags schedule
+#
+#   Default schedule:
+#     Sunday at 03:00 local time
+#
+#   Override schedule:
+#     ansible-playbook -i localhost, -c local backup_awx_stack.yml \
+#       --tags schedule \
+#       -e awx_backup_weekday=6 \
+#       -e awx_backup_hour=2 \
+#       -e awx_backup_minute=30
+#
+# IMPORTANT:
+#   Schedule this from the Docker host via cron/systemd, not from AWX itself.
+#   The backup intentionally stops awx_web and awx_task for part of the run.
+
+- name: Create AWX full-stack restore point
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  become: true
+  tags:
+    - backup
+
+  vars:
+    awx_restore_date: "{{ ansible_date_time.date }}"
+    awx_timestamp: "{{ ansible_date_time.iso8601_basic_short }}"
+    awx_backup_root: "/root/backups/awx-restore-points"
+    awx_staging_root: "{{ awx_backup_root }}/.staging"
+    awx_backup_name: "awx_restore_{{ awx_restore_date }}_{{ ansible_hostname }}_{{ awx_timestamp }}"
+    awx_backup_dir: "{{ awx_staging_root }}/{{ awx_backup_name }}"
+    awx_archive: "{{ awx_backup_root }}/{{ awx_backup_name }}.tar.gz"
+    awx_archive_checksum: "{{ awx_archive }}.sha256"
+
+    # Keep completed restore points for six weeks by default.
+    awx_backup_retention_days: 42
+
+    awx_web_container: "awx_web"
+    awx_task_container: "awx_task"
+    awx_postgres_container: "awx_postgres"
+    awx_redis_container: "awx_redis"
+    awx_memcached_container: "awx_memcached"
+
+    awx_containers:
+      - "{{ awx_web_container }}"
+      - "{{ awx_task_container }}"
+      - "{{ awx_postgres_container }}"
+      - "{{ awx_redis_container }}"
+      - "{{ awx_memcached_container }}"
+
+    awx_direct_api_url: "http://127.0.0.1:3102/api/v2/ping/"
+
+  tasks:
+    - name: Validate Docker CLI is available
+      ansible.builtin.command:
+        argv:
+          - docker
+          - version
+          - --format
+          - "{{ '{{.Server.Version}}' }}"
+      register: awx_docker_version
+      changed_when: false
+
+    - name: Check required AWX containers exist
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - "{{ item }}"
+      loop: "{{ awx_containers }}"
+      register: awx_container_checks
+      changed_when: false
+      failed_when: false
+
+    - name: Assert all required AWX containers exist
+      ansible.builtin.assert:
+        that:
+          - item.rc == 0
+        fail_msg: "Required AWX container '{{ item.item }}' was not found."
+        quiet: true
+      loop: "{{ awx_container_checks.results }}"
+
+    - name: Create secure backup staging directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+      loop:
+        - "{{ awx_backup_root }}"
+        - "{{ awx_staging_root }}"
+        - "{{ awx_backup_dir }}"
+        - "{{ awx_backup_dir }}/database"
+        - "{{ awx_backup_dir }}/docker/inspect"
+        - "{{ awx_backup_dir }}/docker/images"
+        - "{{ awx_backup_dir }}/docker/networks"
+        - "{{ awx_backup_dir }}/docker/volumes"
+        - "{{ awx_backup_dir }}/compose"
+        - "{{ awx_backup_dir }}/validation"
+
+    - name: Write backup manifest
+      ansible.builtin.copy:
+        dest: "{{ awx_backup_dir }}/MANIFEST.txt"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          BACKUP_NAME={{ awx_backup_name }}
+          RESTORE_DATE={{ awx_restore_date }}
+          TIMESTAMP={{ awx_timestamp }}
+          HOSTNAME={{ ansible_hostname }}
+          KERNEL={{ ansible_kernel }}
+          DOCKER_VERSION={{ awx_docker_version.stdout }}
+          CREATED_BY=Ansible
+          PLAYBOOK={{ playbook_dir }}/{{ ansible_play_name | default('backup_awx_stack.yml') }}
+
+    - name: Capture AWX container list
+      ansible.builtin.command:
+        argv:
+          - docker
+          - ps
+          - -a
+          - --format
+          - "table {{ '{{.Names}}' }}\t{{ '{{.Image}}' }}\t{{ '{{.Status}}' }}\t{{ '{{.Ports}}' }}"
+      register: awx_container_list
+      changed_when: false
+
+    - name: Save AWX container list
+      ansible.builtin.copy:
+        dest: "{{ awx_backup_dir }}/docker/container-list.txt"
+        content: "{{ awx_container_list.stdout }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Capture Docker inspect data
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - "{{ item }}"
+      loop: "{{ awx_containers }}"
+      register: awx_inspect_results
+      changed_when: false
+
+    - name: Save Docker inspect data
+      ansible.builtin.copy:
+        dest: "{{ awx_backup_dir }}/docker/inspect/{{ item.item }}.json"
+        content: "{{ item.stdout }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ awx_inspect_results.results }}"
+
+    - name: Capture Docker network list
+      ansible.builtin.command:
+        argv:
+          - docker
+          - network
+          - ls
+          - --format
+          - "{{ '{{.ID}}|{{.Name}}' }}"
+      register: awx_network_list
+      changed_when: false
+
+    - name: Inspect Docker networks
+      ansible.builtin.command:
+        argv:
+          - docker
+          - network
+          - inspect
+          - "{{ item.split('|')[0] }}"
+      loop: "{{ awx_network_list.stdout_lines }}"
+      register: awx_network_inspects
+      changed_when: false
+
+    - name: Save Docker network inspect data
+      ansible.builtin.copy:
+        dest: "{{ awx_backup_dir }}/docker/networks/{{ item.item.split('|')[1] }}.json"
+        content: "{{ item.stdout }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+      loop: "{{ awx_network_inspects.results }}"
+
+    - name: Discover Docker Compose working directory
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - "{{ awx_web_container }}"
+          - --format
+          - "{{ '{{ index .Config.Labels \"com.docker.compose.project.working_dir\" }}' }}"
+      register: awx_compose_workdir
+      changed_when: false
+      failed_when: false
+
+    - name: Discover Docker Compose config files
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - "{{ awx_web_container }}"
+          - --format
+          - "{{ '{{ index .Config.Labels \"com.docker.compose.project.config_files\" }}' }}"
+      register: awx_compose_files
+      changed_when: false
+      failed_when: false
+
+    - name: Save Compose discovery metadata
+      ansible.builtin.copy:
+        dest: "{{ awx_backup_dir }}/compose/compose-location.txt"
+        owner: root
+        group: root
+        mode: "0600"
+        content: |
+          COMPOSE_WORKDIR={{ awx_compose_workdir.stdout | default('') }}
+          COMPOSE_FILES={{ awx_compose_files.stdout | default('') }}
+
+    - name: Check discovered Compose working directory
+      ansible.builtin.stat:
+        path: "{{ awx_compose_workdir.stdout }}"
+      register: awx_compose_workdir_stat
+      when: awx_compose_workdir.stdout | default('') | length > 0
+
+    - name: Archive Docker Compose working directory
+      ansible.builtin.command:
+        argv:
+          - tar
+          - --xattrs
+          - --acls
+          - --numeric-owner
+          - -cpf
+          - "{{ awx_backup_dir }}/compose/compose-directory.tar"
+          - -C
+          - "{{ awx_compose_workdir.stdout | dirname }}"
+          - "{{ awx_compose_workdir.stdout | basename }}"
+      when:
+        - awx_compose_workdir.stdout | default('') | length > 0
+        - awx_compose_workdir_stat.stat.exists | default(false)
+
+    - name: Get PostgreSQL user from container environment
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ awx_postgres_container }}"
+          - sh
+          - -c
+          - 'printf "%s" "${POSTGRES_USER:-awx}"'
+      register: awx_postgres_user
+      changed_when: false
+
+    - name: Get PostgreSQL database from container environment
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ awx_postgres_container }}"
+          - sh
+          - -c
+          - 'printf "%s" "${POSTGRES_DB:-awx}"'
+      register: awx_postgres_db
+      changed_when: false
+
+    - name: Set PostgreSQL temporary backup paths
+      ansible.builtin.set_fact:
+        awx_pg_dump_container_path: "/tmp/{{ awx_backup_name }}.dump"
+        awx_pg_globals_container_path: "/tmp/{{ awx_backup_name }}_globals.sql"
+
+    - name: Perform quiesced AWX backup
+      block:
+        - name: Stop AWX application containers
+          ansible.builtin.command:
+            argv:
+              - docker
+              - stop
+              - "{{ item }}"
+          loop:
+            - "{{ awx_web_container }}"
+            - "{{ awx_task_container }}"
+
+        - name: Create PostgreSQL custom-format database dump
+          ansible.builtin.command:
+            argv:
+              - docker
+              - exec
+              - "{{ awx_postgres_container }}"
+              - pg_dump
+              - -U
+              - "{{ awx_postgres_user.stdout }}"
+              - -d
+              - "{{ awx_postgres_db.stdout }}"
+              - -Fc
+              - -f
+              - "{{ awx_pg_dump_container_path }}"
+
+        - name: Create PostgreSQL globals backup
+          ansible.builtin.command:
+            argv:
+              - docker
+              - exec
+              - "{{ awx_postgres_container }}"
+              - pg_dumpall
+              - -U
+              - "{{ awx_postgres_user.stdout }}"
+              - --globals-only
+              - -f
+              - "{{ awx_pg_globals_container_path }}"
+
+        - name: Validate PostgreSQL dump catalog
+          ansible.builtin.command:
+            argv:
+              - docker
+              - exec
+              - "{{ awx_postgres_container }}"
+              - pg_restore
+              - -l
+              - "{{ awx_pg_dump_container_path }}"
+          register: awx_pg_restore_catalog
+          changed_when: false
+
+        - name: Assert PostgreSQL dump catalog is not empty
+          ansible.builtin.assert:
+            that:
+              - awx_pg_restore_catalog.stdout | length > 0
+            fail_msg: "PostgreSQL pg_restore catalog validation failed."
+
+        - name: Save PostgreSQL dump validation catalog
+          ansible.builtin.copy:
+            dest: "{{ awx_backup_dir }}/validation/pg_restore_catalog.txt"
+            content: "{{ awx_pg_restore_catalog.stdout }}\n"
+            owner: root
+            group: root
+            mode: "0600"
+
+        - name: Copy PostgreSQL database dump to host
+          ansible.builtin.command:
+            argv:
+              - docker
+              - cp
+              - "{{ awx_postgres_container }}:{{ awx_pg_dump_container_path }}"
+              - "{{ awx_backup_dir }}/database/awx_database.dump"
+
+        - name: Copy PostgreSQL globals backup to host
+          ansible.builtin.command:
+            argv:
+              - docker
+              - cp
+              - "{{ awx_postgres_container }}:{{ awx_pg_globals_container_path }}"
+              - "{{ awx_backup_dir }}/database/postgres_globals.sql"
+
+        - name: Remove temporary PostgreSQL backup files from container
+          ansible.builtin.command:
+            argv:
+              - docker
+              - exec
+              - "{{ awx_postgres_container }}"
+              - rm
+              - -f
+              - "{{ awx_pg_dump_container_path }}"
+              - "{{ awx_pg_globals_container_path }}"
+          changed_when: true
+
+        - name: Define dated AWX snapshot image names
+          ansible.builtin.set_fact:
+            awx_web_snapshot_image: "local/awx_web:restore-{{ awx_restore_date }}-{{ awx_timestamp }}"
+            awx_task_snapshot_image: "local/awx_task:restore-{{ awx_restore_date }}-{{ awx_timestamp }}"
+
+        - name: Commit AWX web writable layer
+          ansible.builtin.command:
+            argv:
+              - docker
+              - commit
+              - "{{ awx_web_container }}"
+              - "{{ awx_web_snapshot_image }}"
+          register: awx_web_commit
+
+        - name: Commit AWX task writable layer
+          ansible.builtin.command:
+            argv:
+              - docker
+              - commit
+              - "{{ awx_task_container }}"
+              - "{{ awx_task_snapshot_image }}"
+          register: awx_task_commit
+
+        - name: Save snapshot image names
+          ansible.builtin.copy:
+            dest: "{{ awx_backup_dir }}/docker/images/snapshot-images.txt"
+            owner: root
+            group: root
+            mode: "0600"
+            content: |
+              AWX_WEB_SNAPSHOT={{ awx_web_snapshot_image }}
+              AWX_TASK_SNAPSHOT={{ awx_task_snapshot_image }}
+
+        - name: Stop AWX persistent service containers
+          ansible.builtin.command:
+            argv:
+              - docker
+              - stop
+              - "{{ item }}"
+          loop:
+            - "{{ awx_redis_container }}"
+            - "{{ awx_memcached_container }}"
+            - "{{ awx_postgres_container }}"
+
+        - name: Extract mount metadata from Docker inspect results
+          ansible.builtin.set_fact:
+            awx_mount_records: >-
+              {{
+                (awx_mount_records | default([]))
+                +
+                (
+                  (item.stdout | from_json)[0].Mounts
+                  | map('combine', {'Container': item.item})
+                  | list
+                )
+              }}
+          loop: "{{ awx_inspect_results.results }}"
+
+        - name: Save mount manifest
+          ansible.builtin.copy:
+            dest: "{{ awx_backup_dir }}/docker/volumes/mounts.json"
+            owner: root
+            group: root
+            mode: "0600"
+            content: "{{ awx_mount_records | to_nice_json }}\n"
+
+        - name: Build unique existing mount-source list
+          ansible.builtin.set_fact:
+            awx_mount_sources: >-
+              {{
+                awx_mount_records
+                | selectattr('Source', 'defined')
+                | map(attribute='Source')
+                | reject('equalto', '')
+                | unique
+                | list
+              }}
+
+        - name: Check AWX mount sources
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop: "{{ awx_mount_sources }}"
+          register: awx_mount_source_stats
+
+        - name: Archive AWX mount sources
+          ansible.builtin.command:
+            argv:
+              - tar
+              - --xattrs
+              - --acls
+              - --numeric-owner
+              - -cpf
+              - "{{ awx_backup_dir }}/docker/volumes/{{ item.item | regex_replace('^/', '') | regex_replace('[/ :]', '_') }}.tar"
+              - -C
+              - "{{ item.item | dirname }}"
+              - "{{ item.item | basename }}"
+          loop: "{{ awx_mount_source_stats.results }}"
+          when: item.stat.exists
+
+        - name: Get base image used by each AWX container
+          ansible.builtin.command:
+            argv:
+              - docker
+              - inspect
+              - "{{ item }}"
+              - --format
+              - "{{ '{{.Config.Image}}' }}"
+          loop: "{{ awx_containers }}"
+          register: awx_base_image_results
+          changed_when: false
+
+        - name: Build unique Docker image list for export
+          ansible.builtin.set_fact:
+            awx_images_to_save: >-
+              {{
+                (
+                  awx_base_image_results.results
+                  | map(attribute='stdout')
+                  | list
+                  +
+                  [awx_web_snapshot_image, awx_task_snapshot_image]
+                )
+                | unique
+                | list
+              }}
+
+        - name: Save AWX Docker images
+          ansible.builtin.command:
+            argv: >-
+              {{
+                ['docker', 'save',
+                 '-o', awx_backup_dir + '/docker/images/awx-stack-images.tar']
+                + awx_images_to_save
+              }}
+
+      rescue:
+        - name: Report backup failure
+          ansible.builtin.debug:
+            msg:
+              - "AWX backup failed."
+              - "Ansible failed task: {{ ansible_failed_task.name | default('unknown') }}"
+              - "Ansible failure: {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default('unknown error')) }}"
+
+        - name: Mark backup as failed
+          ansible.builtin.set_fact:
+            awx_backup_failed: true
+
+      always:
+        - name: Start PostgreSQL
+          ansible.builtin.command:
+            argv:
+              - docker
+              - start
+              - "{{ awx_postgres_container }}"
+          failed_when: false
+          changed_when: false
+
+        - name: Start Redis
+          ansible.builtin.command:
+            argv:
+              - docker
+              - start
+              - "{{ awx_redis_container }}"
+          failed_when: false
+          changed_when: false
+
+        - name: Start Memcached
+          ansible.builtin.command:
+            argv:
+              - docker
+              - start
+              - "{{ awx_memcached_container }}"
+          failed_when: false
+          changed_when: false
+
+        - name: Allow AWX data services to initialize
+          ansible.builtin.pause:
+            seconds: 10
+
+        - name: Start AWX task
+          ansible.builtin.command:
+            argv:
+              - docker
+              - start
+              - "{{ awx_task_container }}"
+          failed_when: false
+          changed_when: false
+
+        - name: Start AWX web
+          ansible.builtin.command:
+            argv:
+              - docker
+              - start
+              - "{{ awx_web_container }}"
+          failed_when: false
+          changed_when: false
+
+        - name: Allow AWX application to initialize
+          ansible.builtin.pause:
+            seconds: 20
+
+    - name: Fail play if quiesced backup block failed
+      ansible.builtin.fail:
+        msg: "AWX backup failed. Services were restarted by the always block."
+      when: awx_backup_failed | default(false)
+
+    - name: Validate AWX direct API after backup
+      ansible.builtin.uri:
+        url: "{{ awx_direct_api_url }}"
+        method: GET
+        return_content: true
+        status_code: 200
+      register: awx_api_validation
+      retries: 6
+      delay: 10
+      until: awx_api_validation.status == 200
+
+    - name: Save AWX API validation response
+      ansible.builtin.copy:
+        dest: "{{ awx_backup_dir }}/validation/awx-ping.json"
+        content: "{{ awx_api_validation.content }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Capture final AWX container status
+      ansible.builtin.command:
+        argv:
+          - docker
+          - ps
+          - --filter
+          - name=awx_
+          - --format
+          - "table {{ '{{.Names}}' }}\t{{ '{{.Image}}' }}\t{{ '{{.Status}}' }}\t{{ '{{.Ports}}' }}"
+      register: awx_final_container_status
+      changed_when: false
+
+    - name: Save final AWX container status
+      ansible.builtin.copy:
+        dest: "{{ awx_backup_dir }}/validation/container-status-after-backup.txt"
+        content: "{{ awx_final_container_status.stdout }}\n"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Generate internal SHA256 manifest
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          find . -type f ! -name SHA256SUMS -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > SHA256SUMS
+        chdir: "{{ awx_backup_dir }}"
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Create compressed AWX restore-point archive
+      ansible.builtin.command:
+        argv:
+          - tar
+          - --xattrs
+          - --acls
+          - --numeric-owner
+          - -czpf
+          - "{{ awx_archive }}"
+          - -C
+          - "{{ awx_staging_root }}"
+          - "{{ awx_backup_name }}"
+
+    - name: Secure completed AWX archive
+      ansible.builtin.file:
+        path: "{{ awx_archive }}"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Calculate completed archive checksum
+      ansible.builtin.stat:
+        path: "{{ awx_archive }}"
+        checksum_algorithm: sha256
+        get_checksum: true
+      register: awx_archive_stat
+
+    - name: Write completed archive checksum file
+      ansible.builtin.copy:
+        dest: "{{ awx_archive_checksum }}"
+        owner: root
+        group: root
+        mode: "0600"
+        content: "{{ awx_archive_stat.stat.checksum }}  {{ awx_archive | basename }}\n"
+
+    - name: Remove successful backup staging directory
+      ansible.builtin.file:
+        path: "{{ awx_backup_dir }}"
+        state: absent
+
+    - name: Find expired completed AWX restore points
+      ansible.builtin.find:
+        paths: "{{ awx_backup_root }}"
+        patterns:
+          - "awx_restore_*.tar.gz"
+          - "awx_restore_*.tar.gz.sha256"
+        file_type: file
+        age: "{{ awx_backup_retention_days }}d"
+        recurse: false
+      register: awx_expired_backups
+
+    - name: Remove expired completed AWX restore points
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ awx_expired_backups.files }}"
+
+    - name: Display completed AWX restore point
+      ansible.builtin.debug:
+        msg:
+          - "AWX restore point completed successfully."
+          - "Archive: {{ awx_archive }}"
+          - "SHA256: {{ awx_archive_stat.stat.checksum }}"
+          - "Retention: {{ awx_backup_retention_days }} days"
+          - "AWX API validation: HTTP {{ awx_api_validation.status }}"
+
+
+- name: Configure weekly AWX backup schedule
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: true
+  tags:
+    - schedule
+
+  vars:
+    awx_backup_playbook_path: "/opt/ansible/playbooks/backup_awx_stack.yml"
+    awx_backup_log_dir: "/var/log/ansible"
+    awx_backup_log_file: "{{ awx_backup_log_dir }}/awx_weekly_backup.log"
+
+    # Cron weekday: 0=Sunday, 1=Monday ... 6=Saturday.
+    awx_backup_weekday: "0"
+    awx_backup_hour: "3"
+    awx_backup_minute: "0"
+
+  tasks:
+    - name: Verify scheduled AWX backup playbook exists
+      ansible.builtin.stat:
+        path: "{{ awx_backup_playbook_path }}"
+      register: awx_scheduled_playbook
+
+    - name: Assert scheduled AWX backup playbook exists
+      ansible.builtin.assert:
+        that:
+          - awx_scheduled_playbook.stat.exists
+          - awx_scheduled_playbook.stat.isreg
+        fail_msg: >-
+          {{ awx_backup_playbook_path }} does not exist.
+          Copy this playbook there before installing the weekly schedule.
+
+    - name: Create Ansible backup log directory
+      ansible.builtin.file:
+        path: "{{ awx_backup_log_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0750"
+
+    - name: Schedule weekly AWX full-stack backup
+      ansible.builtin.cron:
+        name: "AWX weekly full-stack restore point"
+        user: root
+        minute: "{{ awx_backup_minute }}"
+        hour: "{{ awx_backup_hour }}"
+        weekday: "{{ awx_backup_weekday }}"
+        job: >-
+          /usr/bin/flock -n /var/lock/awx-weekly-backup.lock
+          /usr/bin/ansible-playbook
+          -i localhost,
+          -c local
+          {{ awx_backup_playbook_path }}
+          --tags backup
+          >> {{ awx_backup_log_file }} 2>&1
+        state: present
+
+    - name: Display weekly AWX backup schedule
+      ansible.builtin.debug:
+        msg:
+          - "Weekly AWX backup schedule installed."
+          - "Cron: minute={{ awx_backup_minute }} hour={{ awx_backup_hour }} weekday={{ awx_backup_weekday }}"
+          - "Playbook: {{ awx_backup_playbook_path }}"
+          - "Log: {{ awx_backup_log_file }}"
+          - "Lock: /var/lock/awx-weekly-backup.lock"
