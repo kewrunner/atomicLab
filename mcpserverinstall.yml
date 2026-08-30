@@ -1,0 +1,651 @@
+```yaml
+---
+- name: Install local read-only sysadmin MCP server
+  hosts: linux_workstations
+  become: true
+  gather_facts: true
+
+  vars:
+    mcp_user: freddygonzalez
+    mcp_project_name: local-sysadmin
+    mcp_user_home: "/home/{{ mcp_user }}"
+    mcp_base_dir: "{{ mcp_user_home }}/mcp-servers"
+    mcp_project_dir: "{{ mcp_base_dir }}/{{ mcp_project_name }}"
+    mcp_server_file: "{{ mcp_project_dir }}/server.py"
+    mcp_vscode_dir: "{{ mcp_project_dir }}/.vscode"
+    mcp_vscode_config: "{{ mcp_vscode_dir }}/mcp.json"
+    mcp_uv_path: "{{ mcp_user_home }}/.local/bin/uv"
+
+    mcp_packages:
+      - python3
+      - python3-venv
+      - python3-pip
+      - curl
+      - ca-certificates
+      - jq
+      - iproute2
+      - procps
+
+  pre_tasks:
+    - name: Validate supported operating system
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == "Debian"
+          - ansible_facts.distribution == "Ubuntu"
+        fail_msg: >-
+          This playbook currently supports Ubuntu only.
+          Detected {{ ansible_facts.distribution }}
+          {{ ansible_facts.distribution_version }}.
+        success_msg: >-
+          Supported Ubuntu host detected:
+          {{ ansible_facts.distribution }}
+          {{ ansible_facts.distribution_version }}.
+
+    - name: Validate target MCP user exists
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ mcp_user }}"
+
+    - name: Validate Python version
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.python_version is version('3.10', '>=')
+        fail_msg: >-
+          Python 3.10 or later is required.
+          Detected {{ ansible_facts.python_version }}.
+        success_msg: >-
+          Python {{ ansible_facts.python_version }} is supported.
+
+  tasks:
+    ###########################################################################
+    # Operating system prerequisites
+    ###########################################################################
+
+    - name: Install Ubuntu MCP prerequisites
+      ansible.builtin.apt:
+        name: "{{ mcp_packages }}"
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    ###########################################################################
+    # Directory structure
+    ###########################################################################
+
+    - name: Create MCP base directory
+      ansible.builtin.file:
+        path: "{{ mcp_base_dir }}"
+        state: directory
+        owner: "{{ mcp_user }}"
+        group: "{{ mcp_user }}"
+        mode: "0755"
+
+    - name: Create MCP project directory
+      ansible.builtin.file:
+        path: "{{ mcp_project_dir }}"
+        state: directory
+        owner: "{{ mcp_user }}"
+        group: "{{ mcp_user }}"
+        mode: "0755"
+
+    - name: Create VS Code MCP directory
+      ansible.builtin.file:
+        path: "{{ mcp_vscode_dir }}"
+        state: directory
+        owner: "{{ mcp_user }}"
+        group: "{{ mcp_user }}"
+        mode: "0755"
+
+    ###########################################################################
+    # uv
+    ###########################################################################
+
+    - name: Check whether uv is installed
+      ansible.builtin.stat:
+        path: "{{ mcp_uv_path }}"
+      register: uv_binary
+
+    - name: Install uv for MCP user
+      become: true
+      become_user: "{{ mcp_user }}"
+      ansible.builtin.shell: |
+        set -o pipefail
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+      args:
+        executable: /bin/bash
+      when: not uv_binary.stat.exists
+      changed_when: true
+
+    - name: Verify uv executable exists
+      ansible.builtin.stat:
+        path: "{{ mcp_uv_path }}"
+      register: uv_binary_after
+
+    - name: Assert uv installation succeeded
+      ansible.builtin.assert:
+        that:
+          - uv_binary_after.stat.exists
+          - uv_binary_after.stat.executable
+        fail_msg: "uv was not installed successfully at {{ mcp_uv_path }}."
+
+    ###########################################################################
+    # uv project
+    ###########################################################################
+
+    - name: Check for existing pyproject.toml
+      ansible.builtin.stat:
+        path: "{{ mcp_project_dir }}/pyproject.toml"
+      register: pyproject
+
+    - name: Initialize uv project
+      become: true
+      become_user: "{{ mcp_user }}"
+      ansible.builtin.command:
+        argv:
+          - "{{ mcp_uv_path }}"
+          - init
+          - --bare
+          - "{{ mcp_project_dir }}"
+      when: not pyproject.stat.exists
+      changed_when: true
+
+    ###########################################################################
+    # MCP SDK
+    ###########################################################################
+
+    - name: Install MCP Python SDK
+      become: true
+      become_user: "{{ mcp_user }}"
+      ansible.builtin.command:
+        argv:
+          - "{{ mcp_uv_path }}"
+          - add
+          - "mcp[cli]"
+      args:
+        chdir: "{{ mcp_project_dir }}"
+      register: mcp_sdk_install
+      changed_when: >-
+        'Installed' in mcp_sdk_install.stdout or
+        'Updated' in mcp_sdk_install.stdout or
+        'Added' in mcp_sdk_install.stdout
+
+    ###########################################################################
+    # MCP server
+    ###########################################################################
+
+    - name: Deploy MCP sysadmin server
+      ansible.builtin.copy:
+        dest: "{{ mcp_server_file }}"
+        owner: "{{ mcp_user }}"
+        group: "{{ mcp_user }}"
+        mode: "0644"
+        backup: true
+        content: |
+          from __future__ import annotations
+
+          import platform
+          import socket
+          import subprocess
+          from pathlib import Path
+
+          from mcp.server.mcpserver import MCPServer
+          from mcp.types import ToolAnnotations
+
+
+          mcp = MCPServer(
+              "local-sysadmin",
+              instructions=(
+                  "Read-only Linux workstation administration and SRE "
+                  "diagnostic tools. This server intentionally provides "
+                  "no arbitrary shell execution, privilege escalation, "
+                  "package modification, service modification, account "
+                  "modification, or filesystem write operations."
+              ),
+          )
+
+
+          READ_ONLY = ToolAnnotations(
+              read_only_hint=True,
+              idempotent_hint=True,
+          )
+
+
+          def run_command(
+              command: list[str],
+              timeout: int = 15,
+          ) -> dict:
+              try:
+                  proc = subprocess.run(
+                      command,
+                      capture_output=True,
+                      text=True,
+                      timeout=timeout,
+                      check=False,
+                  )
+
+                  return {
+                      "command": command,
+                      "returncode": proc.returncode,
+                      "stdout": proc.stdout.strip(),
+                      "stderr": proc.stderr.strip(),
+                  }
+
+              except subprocess.TimeoutExpired:
+                  return {
+                      "command": command,
+                      "returncode": 124,
+                      "stdout": "",
+                      "stderr": f"Command timed out after {timeout} seconds",
+                  }
+
+              except FileNotFoundError as exc:
+                  return {
+                      "command": command,
+                      "returncode": 127,
+                      "stdout": "",
+                      "stderr": str(exc),
+                  }
+
+              except Exception as exc:
+                  return {
+                      "command": command,
+                      "returncode": 1,
+                      "stdout": "",
+                      "stderr": str(exc),
+                  }
+
+
+          def validate_service_name(service: str) -> str | None:
+              allowed = set(
+                  "abcdefghijklmnopqrstuvwxyz"
+                  "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                  "0123456789"
+                  "._-@"
+              )
+
+              if not service:
+                  return "Service name cannot be empty"
+
+              if len(service) > 128:
+                  return "Service name exceeds 128 characters"
+
+              if any(character not in allowed for character in service):
+                  return (
+                      "Invalid service name. Allowed characters are "
+                      "letters, digits, '.', '_', '-', and '@'."
+                  )
+
+              return None
+
+
+          @mcp.tool(
+              description="Return basic Linux host information.",
+              annotations=READ_ONLY,
+          )
+          def host_summary() -> dict:
+              return {
+                  "hostname": socket.gethostname(),
+                  "fqdn": socket.getfqdn(),
+                  "platform": platform.platform(),
+                  "system": platform.system(),
+                  "kernel": platform.release(),
+                  "architecture": platform.machine(),
+                  "python": platform.python_version(),
+              }
+
+
+          @mcp.tool(
+              description="Return Linux distribution information.",
+              annotations=READ_ONLY,
+          )
+          def os_release() -> dict:
+              path = Path("/etc/os-release")
+
+              if not path.exists():
+                  return {"error": "/etc/os-release not found"}
+
+              data: dict[str, str] = {}
+
+              for line in path.read_text().splitlines():
+                  if "=" not in line:
+                      continue
+
+                  key, value = line.split("=", 1)
+                  data[key] = value.strip('"')
+
+              return data
+
+
+          @mcp.tool(
+              description="Return workstation uptime and system load averages.",
+              annotations=READ_ONLY,
+          )
+          def uptime() -> dict:
+              return run_command(["uptime"])
+
+
+          @mcp.tool(
+              description="Return RAM and swap utilization.",
+              annotations=READ_ONLY,
+          )
+          def memory_usage() -> dict:
+              return run_command(["free", "-h"])
+
+
+          @mcp.tool(
+              description="Return persistent filesystem capacity and utilization.",
+              annotations=READ_ONLY,
+          )
+          def filesystem_usage() -> dict:
+              return run_command(
+                  [
+                      "df",
+                      "-hT",
+                      "-x",
+                      "tmpfs",
+                      "-x",
+                      "devtmpfs",
+                      "-x",
+                      "squashfs",
+                  ]
+              )
+
+
+          @mcp.tool(
+              description="Return filesystem inode utilization.",
+              annotations=READ_ONLY,
+          )
+          def inode_usage() -> dict:
+              return run_command(
+                  [
+                      "df",
+                      "-hi",
+                      "-x",
+                      "tmpfs",
+                      "-x",
+                      "devtmpfs",
+                      "-x",
+                      "squashfs",
+                  ]
+              )
+
+
+          @mcp.tool(
+              description="Return block-device topology and filesystem information.",
+              annotations=READ_ONLY,
+          )
+          def block_devices() -> dict:
+              return run_command(
+                  [
+                      "lsblk",
+                      "-o",
+                      "NAME,SIZE,TYPE,FSTYPE,FSVER,MOUNTPOINTS,UUID",
+                  ]
+              )
+
+
+          @mcp.tool(
+              description="Return concise network interface information.",
+              annotations=READ_ONLY,
+          )
+          def network_interfaces() -> dict:
+              return run_command(
+                  [
+                      "ip",
+                      "-br",
+                      "address",
+                  ]
+              )
+
+
+          @mcp.tool(
+              description="Return the IPv4 routing table.",
+              annotations=READ_ONLY,
+          )
+          def routing_table() -> dict:
+              return run_command(
+                  [
+                      "ip",
+                      "-4",
+                      "route",
+                      "show",
+                  ]
+              )
+
+
+          @mcp.tool(
+              description="Return the configured IPv4 default route.",
+              annotations=READ_ONLY,
+          )
+          def default_route() -> dict:
+              return run_command(
+                  [
+                      "ip",
+                      "-4",
+                      "route",
+                      "show",
+                      "default",
+                  ]
+              )
+
+
+          @mcp.tool(
+              description="Return listening TCP and UDP sockets.",
+              annotations=READ_ONLY,
+          )
+          def listening_ports() -> dict:
+              return run_command(["ss", "-lntup"])
+
+
+          @mcp.tool(
+              description="Return currently failed systemd units.",
+              annotations=READ_ONLY,
+          )
+          def failed_systemd_units() -> dict:
+              return run_command(
+                  [
+                      "systemctl",
+                      "--failed",
+                      "--no-pager",
+                      "--plain",
+                  ]
+              )
+
+
+          @mcp.tool(
+              description="Return detailed read-only systemd service status.",
+              annotations=READ_ONLY,
+          )
+          def service_status(service: str) -> dict:
+              error = validate_service_name(service)
+
+              if error:
+                  return {"error": error}
+
+              return run_command(
+                  [
+                      "systemctl",
+                      "status",
+                      service,
+                      "--no-pager",
+                      "--lines=30",
+                  ]
+              )
+
+
+          @mcp.tool(
+              description="Determine whether a systemd service is active.",
+              annotations=READ_ONLY,
+          )
+          def service_is_active(service: str) -> dict:
+              error = validate_service_name(service)
+
+              if error:
+                  return {"error": error}
+
+              return run_command(
+                  [
+                      "systemctl",
+                      "is-active",
+                      service,
+                  ]
+              )
+
+
+          @mcp.tool(
+              description="Return processes sorted by CPU utilization.",
+              annotations=READ_ONLY,
+          )
+          def process_summary() -> dict:
+              return run_command(
+                  [
+                      "ps",
+                      "-eo",
+                      "pid,user,%cpu,%mem,comm",
+                      "--sort=-%cpu",
+                  ]
+              )
+
+
+          @mcp.resource("system://os-release")
+          def system_os_release() -> str:
+              path = Path("/etc/os-release")
+
+              if not path.exists():
+                  return "/etc/os-release not found"
+
+              return path.read_text()
+
+
+          def main() -> None:
+              mcp.run()
+
+
+          if __name__ == "__main__":
+              main()
+
+    ###########################################################################
+    # VS Code MCP configuration
+    ###########################################################################
+
+    - name: Deploy VS Code MCP configuration
+      ansible.builtin.copy:
+        dest: "{{ mcp_vscode_config }}"
+        owner: "{{ mcp_user }}"
+        group: "{{ mcp_user }}"
+        mode: "0644"
+        backup: true
+        content: |
+          {
+              "servers": {
+                  "localSysadmin": {
+                      "type": "stdio",
+                      "command": "{{ mcp_uv_path }}",
+                      "args": [
+                          "--directory",
+                          "{{ mcp_project_dir }}",
+                          "run",
+                          "python",
+                          "{{ mcp_server_file }}"
+                      ]
+                  }
+              }
+          }
+
+    ###########################################################################
+    # Validation
+    ###########################################################################
+
+    - name: Validate MCP server Python syntax
+      become: true
+      become_user: "{{ mcp_user }}"
+      ansible.builtin.command:
+        argv:
+          - "{{ mcp_uv_path }}"
+          - run
+          - python
+          - -m
+          - py_compile
+          - "{{ mcp_server_file }}"
+      args:
+        chdir: "{{ mcp_project_dir }}"
+      changed_when: false
+
+    - name: Validate MCP v2 imports
+      become: true
+      become_user: "{{ mcp_user }}"
+      ansible.builtin.shell: |
+        set -euo pipefail
+
+        "{{ mcp_uv_path }}" run python - <<'PY'
+        import importlib.metadata
+
+        from mcp.server.mcpserver import MCPServer
+        from mcp.types import ToolAnnotations
+
+        print("MCP SDK:", importlib.metadata.version("mcp"))
+        print("MCPServer: OK")
+        print("ToolAnnotations: OK")
+        PY
+      args:
+        chdir: "{{ mcp_project_dir }}"
+        executable: /bin/bash
+      register: mcp_import_validation
+      changed_when: false
+
+    - name: Validate MCP server module import
+      become: true
+      become_user: "{{ mcp_user }}"
+      ansible.builtin.command:
+        argv:
+          - "{{ mcp_uv_path }}"
+          - run
+          - python
+          - -c
+          - "import server; print(type(server.mcp).__name__)"
+      args:
+        chdir: "{{ mcp_project_dir }}"
+      register: mcp_server_import
+      changed_when: false
+
+    - name: Validate VS Code MCP JSON
+      ansible.builtin.command:
+        argv:
+          - jq
+          - empty
+          - "{{ mcp_vscode_config }}"
+      changed_when: false
+
+    - name: Read installed MCP version
+      become: true
+      become_user: "{{ mcp_user }}"
+      ansible.builtin.command:
+        argv:
+          - "{{ mcp_uv_path }}"
+          - run
+          - python
+          - -c
+          - "import importlib.metadata; print(importlib.metadata.version('mcp'))"
+      args:
+        chdir: "{{ mcp_project_dir }}"
+      register: installed_mcp_version
+      changed_when: false
+
+  post_tasks:
+    - name: Publish MCP installation evidence
+      ansible.builtin.debug:
+        msg:
+          - "Local Sysadmin MCP installation complete"
+          - "Host: {{ inventory_hostname }}"
+          - "OS: {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }}"
+          - "User: {{ mcp_user }}"
+          - "Project: {{ mcp_project_dir }}"
+          - "Server: {{ mcp_server_file }}"
+          - "VS Code config: {{ mcp_vscode_config }}"
+          - "uv: {{ mcp_uv_path }}"
+          - "MCP SDK: {{ installed_mcp_version.stdout }}"
+          - "Python syntax: PASS"
+          - "MCP v2 import: PASS"
+          - "Server import: PASS"
+          - "VS Code JSON: PASS"
+```
