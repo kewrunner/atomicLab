@@ -20,6 +20,30 @@
           - "('http://127.0.0.1:5601' | regex_replace('^http://', 'ws://')) == expected_websocket_backends.http"
           - "('https://backend.example.com:8443' | regex_replace('^https://', 'wss://')) == expected_websocket_backends.https"
 
+    - name: Assert raw os-release parsing behavior
+      ansible.builtin.assert:
+        that:
+          - "(raw_os_release.ubuntu | regex_findall('(?m)^ID=\\\"?([A-Za-z0-9_-]+)\\\"?$') | first | lower) == 'ubuntu'"
+          - "(raw_os_release.debian | regex_findall('(?m)^ID=\\\"?([A-Za-z0-9_-]+)\\\"?$') | first | lower) == 'debian'"
+          - "(raw_os_release.unsupported | regex_findall('(?m)^ID=\\\"?([A-Za-z0-9_-]+)\\\"?$') | first | lower) not in ['ubuntu', 'debian']"
+
+    - name: Read deployment and preflight sources
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop:
+        - "{{ playbook_dir }}/../apache_domain_vhosts/deploy.yml"
+        - "{{ playbook_dir }}/../apache_domain_vhosts/preflight.yml"
+        - "{{ playbook_dir }}/../apache_domain_vhosts/tasks/validate_sites.yml"
+      register: implementation_sources
+
+    - name: Verify compatibility-safe ordering and validation boundaries
+      ansible.builtin.assert:
+        that:
+          - "'gather_facts: false' in (implementation_sources.results[0].content | b64decode)"
+          - "'ansible.builtin.raw' in (implementation_sources.results[1].content | b64decode)"
+          - "(implementation_sources.results[2].content | b64decode) is not search('ansible_facts\\.distribution')"
+          - "(implementation_sources.results[1].content | b64decode).find('include_tasks: tasks/validate_sites.yml') < (implementation_sources.results[1].content | b64decode).find('Collect compatibility-safe Apache preflight state')"
+
     - name: Read HTTP template
       ansible.builtin.slurp:
         src: "{{ playbook_dir }}/../apache_domain_vhosts/templates/vhost-http.conf.j2"
