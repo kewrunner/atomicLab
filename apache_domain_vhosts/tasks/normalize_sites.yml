@@ -1,0 +1,18 @@
+---
+- name: Normalize sites_add into a list
+  ansible.builtin.set_fact:
+    apache_sites_input: >-
+      {{ (sites_add.split(',') if sites_add is string else sites_add | default([])) | list }}
+
+- name: Split comma-delimited values supplied in a list
+  ansible.builtin.set_fact:
+    apache_sites_input_expanded: >-
+      {{ apache_sites_input_expanded | default([]) + (item.split(',') if item is string else [item]) }}
+  loop: "{{ apache_sites_input }}"
+  when: apache_sites_input | length > 0
+
+- name: Trim and deduplicate requested domains
+  ansible.builtin.set_fact:
+    apache_sites_to_add: >-
+      {{ apache_sites_input_expanded | default([])
+         | map('trim') | reject('equalto', '') | unique | list }}

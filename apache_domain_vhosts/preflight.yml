@@ -1,0 +1,84 @@
+---
+- name: Normalize survey input
+  ansible.builtin.include_tasks: tasks/normalize_sites.yml
+
+- name: Validate supported platform and backend
+  ansible.builtin.include_tasks: tasks/validate_sites.yml
+  when: apache_sites_to_add | length > 0
+
+- name: Verify Apache directories and tooling
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ apache_config_root }}"
+    - "{{ apache_sites_available }}"
+    - "{{ apachectl_path }}"
+    - "{{ a2ensite_path }}"
+  register: apache_preflight_paths
+  when: apache_sites_to_add | length > 0
+
+- name: Assert Debian Apache layout and tooling
+  ansible.builtin.assert:
+    that:
+      - apache_preflight_paths.results | map(attribute='stat.exists') | min
+    fail_msg: >-
+      Debian Apache preflight failed: expected /etc/apache2 layout and
+      apache2ctl/a2ensite tooling were not all found.
+  when: apache_sites_to_add | length > 0
+
+- name: Verify apache2 service is available
+  ansible.builtin.service_facts:
+  when: apache_sites_to_add | length > 0
+
+- name: Assert apache2 service exists
+  ansible.builtin.assert:
+    that: apache_service_name in ansible_facts.services
+    fail_msg: "Required service {{ apache_service_name }} was not found."
+  when: apache_sites_to_add | length > 0
+
+- name: Verify required Apache modules are enabled
+  ansible.builtin.stat:
+    path: "{{ apache_config_root }}/mods-enabled/{{ item }}.load"
+  loop: "{{ apache_required_modules }}"
+  register: apache_module_checks
+  when: apache_sites_to_add | length > 0
+
+- name: Assert required Apache modules are enabled
+  ansible.builtin.assert:
+    that: item.stat.exists
+    fail_msg: >-
+      Required Apache module {{ item.item }} is unavailable or not enabled;
+      no Apache files have been changed.
+  loop: "{{ apache_module_checks.results }}"
+  when: apache_sites_to_add | length > 0
+
+- name: Check ownership of deterministic target files
+  ansible.builtin.stat:
+    path: "{{ apache_sites_available }}/{{ item }}"
+  loop: >-
+    {{ apache_sites_to_add | map('regex_replace', '$', '.conf') | list
+       + apache_sites_to_add | map('regex_replace', '$', '-le-ssl.conf') | list }}
+  register: apache_target_checks
+  when: apache_sites_to_add | length > 0
+
+- name: Read existing target files for ownership checks
+  ansible.builtin.slurp:
+    src: "{{ item.stat.path }}"
+  loop: "{{ apache_target_checks.results }}"
+  register: apache_existing_targets
+  when:
+    - apache_sites_to_add | length > 0
+    - item.stat.exists
+
+- name: Reject unmanaged target files
+  ansible.builtin.assert:
+    that: >-
+      (not item.stat.exists) or
+      (apache_management_marker in
+       ((apache_existing_targets.results | selectattr('item', 'equalto', item.item)
+         | map(attribute='content') | first | default('') | b64decode)))
+    fail_msg: >-
+      Refusing to overwrite unmanaged Apache target
+      {{ apache_sites_available }}/{{ item.item }}.
+  loop: "{{ apache_target_checks.results }}"
+  when: apache_sites_to_add | length > 0

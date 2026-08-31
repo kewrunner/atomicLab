@@ -1,0 +1,18 @@
+---
+- name: Validate Apache configuration
+  ansible.builtin.command: "{{ apachectl_path }} configtest"
+  register: apache_configtest
+  changed_when: false
+
+- name: Fail when Apache configuration is invalid
+  ansible.builtin.fail:
+    msg: >-
+      apache2ctl configtest failed; Apache was not reloaded.
+      {{ apache_configtest.stderr | default(apache_configtest.stdout) }}
+  when: apache_configtest.rc != 0
+
+- name: Reload Apache after successful configuration validation
+  ansible.builtin.service:
+    name: "{{ apache_service_name }}"
+    state: reloaded
+  when: apache_configtest.rc == 0

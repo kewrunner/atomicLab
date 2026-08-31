@@ -1,0 +1,36 @@
+---
+- name: Validate Apache domain vhost deterministic behavior
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - fixtures/apache-domain-vhost-cases.yml
+  tasks:
+    - name: Normalize comma-delimited fixture
+      ansible.builtin.set_fact:
+        fixture_expanded: "{{ comma_domains.split(',') | map('trim') | unique | list }}"
+
+    - name: Assert normalization result
+      ansible.builtin.assert:
+        that: fixture_expanded == expected_normalized_domains
+
+    - name: Assert backend scheme derivation
+      ansible.builtin.assert:
+        that:
+          - "('http://127.0.0.1:5601' | regex_replace('^http://', 'ws://')) == expected_websocket_backends.http"
+          - "('https://backend.example.com:8443' | regex_replace('^https://', 'wss://')) == expected_websocket_backends.https"
+
+    - name: Read HTTP template
+      ansible.builtin.slurp:
+        src: "{{ playbook_dir }}/../apache_domain_vhosts/templates/vhost-http.conf.j2"
+      register: http_template
+
+    - name: Verify HTTP and WebSocket directives
+      ansible.builtin.assert:
+        that:
+          - "'ProxyPreserveHost On' in (http_template.content | b64decode)"
+          - "'ProxyPass' in (http_template.content | b64decode)"
+          - "'ProxyPassReverse' in (http_template.content | b64decode)"
+          - "'HTTP:Upgrade' in (http_template.content | b64decode)"
+          - "'HTTP:Connection' in (http_template.content | b64decode)"
+          - "'apache_management_marker' in (http_template.content | b64decode)"

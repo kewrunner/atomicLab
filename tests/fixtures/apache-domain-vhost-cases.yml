@@ -1,0 +1,19 @@
+---
+single_domain: elastic.atomicharvest.com
+comma_domains: "elastic.atomicharvest.com, elastic.wazo.tv, elastic.atomicharvest.com"
+invalid_domains:
+  - https://bad.example.com
+  - bad.example.com/path
+  - bad.example.com:443
+  - bad example.com
+invalid_backends:
+  - /relative
+  - ftp://backend.example.com
+  - http://backend.example.com/path
+  - "http://backend.example.com bad"
+expected_normalized_domains:
+  - elastic.atomicharvest.com
+  - elastic.wazo.tv
+expected_websocket_backends:
+  http: ws://127.0.0.1:5601
+  https: wss://backend.example.com:8443

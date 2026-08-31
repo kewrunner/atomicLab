@@ -1,0 +1,75 @@
+---
+- name: Inspect certificate pair for {{ apache_domain }}
+  ansible.builtin.stat:
+    path: "{{ apache_cert_root }}/{{ apache_domain }}/{{ item }}"
+  loop:
+    - fullchain.pem
+    - privkey.pem
+  register: apache_certificate_checks
+
+- name: Inspect existing HTTPS configuration for {{ apache_domain }}
+  ansible.builtin.stat:
+    path: "{{ apache_sites_available }}/{{ apache_domain }}-le-ssl.conf"
+  register: apache_existing_https_file
+
+- name: Set certificate availability for {{ apache_domain }}
+  ansible.builtin.set_fact:
+    apache_certificates_complete: >-
+      {{ apache_certificate_checks.results | map(attribute='stat.exists') | min | bool }}
+
+- name: Report incomplete certificate pair for {{ apache_domain }}
+  ansible.builtin.debug:
+    msg: >-
+      HTTPS skipped for {{ apache_domain }} because both Let’s Encrypt
+      certificate files are not present.
+  when: not apache_certificates_complete
+
+- name: Report retained HTTPS configuration with missing certificates
+  ansible.builtin.debug:
+    msg: >-
+      Managed HTTPS configuration for {{ apache_domain }} is retained, but its
+      certificate pair is incomplete; certificate remediation is required.
+  when:
+    - not apache_certificates_complete
+    - apache_existing_https_file.stat.exists
+
+- name: Render managed HTTP VirtualHost for {{ apache_domain }}
+  ansible.builtin.template:
+    src: ../templates/vhost-http.conf.j2
+    dest: "{{ apache_sites_available }}/{{ apache_domain }}.conf"
+    mode: '0644'
+  register: apache_http_file
+
+- name: Render managed HTTPS VirtualHost for {{ apache_domain }}
+  ansible.builtin.template:
+    src: ../templates/vhost-ssl.conf.j2
+    dest: "{{ apache_sites_available }}/{{ apache_domain }}-le-ssl.conf"
+    mode: '0644'
+  register: apache_https_file
+  when: apache_certificates_complete
+
+- name: Enable managed HTTP site {{ apache_domain }}
+  ansible.builtin.command:
+    argv: ["{{ a2ensite_path }}", "{{ apache_domain }}.conf"]
+  args:
+    creates: "{{ apache_sites_enabled }}/{{ apache_domain }}.conf"
+  register: apache_http_enable
+  changed_when: apache_http_enable.rc == 0 and 'already enabled' not in (apache_http_enable.stdout | default('') | lower)
+
+- name: Enable managed HTTPS site {{ apache_domain }}
+  ansible.builtin.command:
+    argv: ["{{ a2ensite_path }}", "{{ apache_domain }}-le-ssl.conf"]
+  args:
+    creates: "{{ apache_sites_enabled }}/{{ apache_domain }}-le-ssl.conf"
+  register: apache_https_enable
+  changed_when: apache_https_enable.rc == 0 and 'already enabled' not in (apache_https_enable.stdout | default('') | lower)
+  when: apache_certificates_complete
+
+- name: Track whether managed Apache state changed
+  ansible.builtin.set_fact:
+    apache_managed_changed: >-
+      {{ apache_managed_changed | default(false) | bool
+         or apache_http_file.changed | default(false) | bool
+         or apache_https_file.changed | default(false) | bool
+         or apache_http_enable.changed | default(false) | bool
+         or apache_https_enable.changed | default(false) | bool }}

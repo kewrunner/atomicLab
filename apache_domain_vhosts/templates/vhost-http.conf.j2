@@ -1,0 +1,16 @@
+{{ apache_management_marker }}
+<VirtualHost *:80>
+    ServerName {{ apache_domain }}
+    ProxyPreserveHost On
+
+    RewriteEngine On
+    RewriteCond %{HTTP:Upgrade} =websocket [NC]
+    RewriteCond %{HTTP:Connection} upgrade [NC]
+    RewriteRule ^/(.*)$ {{ apache_websocket_backend }}/$1 [P,L]
+
+    ProxyPass        / {{ apache_proxy_backend }}/
+    ProxyPassReverse / {{ apache_proxy_backend }}/
+
+    ErrorLog ${APACHE_LOG_DIR}/{{ apache_domain }}-error.log
+    CustomLog ${APACHE_LOG_DIR}/{{ apache_domain }}-access.log combined
+</VirtualHost>

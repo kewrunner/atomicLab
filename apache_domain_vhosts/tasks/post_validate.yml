@@ -1,0 +1,3 @@
+---
+- name: Include shared post-validation workflow
+  ansible.builtin.include_tasks: ../post_validate.yml
