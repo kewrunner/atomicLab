@@ -1,0 +1,40 @@
+---
+- name: Manage Apache domain virtual hosts
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    apache_sites_to_add: []
+    apache_proxy_backend: http://127.0.0.1:5601
+    apache_config_root: /etc/apache2
+    apache_sites_available: "{{ apache_config_root }}/sites-available"
+    apache_sites_enabled: "{{ apache_config_root }}/sites-enabled"
+    apache_cert_root: /etc/letsencrypt/live
+    apache_service_name: apache2
+    apachectl_path: /usr/sbin/apache2ctl
+    a2ensite_path: /usr/sbin/a2ensite
+    apache_required_modules:
+      - proxy
+      - proxy_http
+      - proxy_wstunnel
+      - rewrite
+    apache_management_marker: "# Managed by Ansible: apache-domain-vhost-management"
+
+  tasks:
+    - name: Run Apache domain vhost preflight
+      ansible.builtin.include_tasks: preflight.yml
+
+    - name: Configure requested Apache sites
+      ansible.builtin.include_tasks: tasks/configure_site.yml
+      loop: "{{ apache_sites_to_add }}"
+      loop_control:
+        loop_var: apache_domain
+        label: "{{ apache_domain }}"
+      when: apache_sites_to_add | length > 0
+
+    - name: Validate and reload Apache when managed state changed
+      ansible.builtin.include_tasks: post_validate.yml
+      when:
+        - apache_sites_to_add | length > 0
+        - apache_managed_changed | default(false) | bool

@@ -1,0 +1,33 @@
+---
+- name: Validate supported distribution
+  ansible.builtin.assert:
+    that: ansible_facts.distribution in ['Ubuntu', 'Debian']
+    fail_msg: >-
+      Unsupported platform {{ ansible_facts.distribution | default('unknown') }};
+      only Ubuntu and Debian Apache layouts are supported.
+
+- name: Validate every requested FQDN
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item | length <= 253
+      - item is match('^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$')
+      - item is not search('[^A-Za-z0-9.\\-]')
+    fail_msg: "Invalid FQDN in sites_add: {{ item }}"
+  loop: "{{ apache_sites_to_add }}"
+
+- name: Validate proxy backend
+  ansible.builtin.assert:
+    that:
+      - apache_proxy_backend is string
+      - apache_proxy_backend is match('^https?://[^/:?#]+(?::[0-9]{1,5})?$')
+      - apache_proxy_backend is not search('[[:space:]]')
+    fail_msg: >-
+      apache_proxy_backend must be an absolute http:// or https:// URL with a
+      valid host, optional port, and no path; received {{ apache_proxy_backend }}.
+
+- name: Derive WebSocket backend URL
+  ansible.builtin.set_fact:
+    apache_websocket_backend: >-
+      {{ apache_proxy_backend | regex_replace('^http://', 'ws://')
+         | regex_replace('^https://', 'wss://') }}
