@@ -1,24 +1,11 @@
 ---
-- name: Diagnose AWX to managed host compatibility
+- name: Diagnose Apache domain vhost compatibility
   hosts: all
   gather_facts: false
-  become: false
-
   tasks:
-    - name: Read operating system without Python dependency
-      ansible.builtin.raw: cat /etc/os-release
-      register: os_release
+    - name: Collect controller-safe target diagnostics
+      ansible.builtin.raw: >-
+        printf 'ansible raw compatibility probe\n';
+        cat /etc/os-release 2>/dev/null || true;
+        printf 'python='; python3 --version 2>&1 || true
       changed_when: false
-
-    - name: Read managed host Python version
-      ansible.builtin.raw: |
-        command -v python3 || true
-        python3 --version 2>&1 || true
-      register: python_version
-      changed_when: false
-
-    - name: Display managed host information
-      ansible.builtin.debug:
-        msg:
-          - "{{ os_release.stdout_lines }}"
-          - "{{ python_version.stdout_lines }}"

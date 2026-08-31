@@ -1,0 +1,24 @@
+---
+- name: Safely compare and replace raw compatibility file
+  ansible.builtin.raw: >-
+    set -eu;
+    tmp=$(mktemp '{{ apache_raw_target }}.ansible.XXXXXX');
+    trap 'rm -f "$tmp"' EXIT;
+    printf '%s' '{{ apache_raw_content | b64encode }}' | base64 -d > "$tmp";
+    chmod 0644 "$tmp";
+    if [ -f '{{ apache_raw_target }}' ] && cmp -s "$tmp" '{{ apache_raw_target }}'; then
+      printf 'unchanged\n';
+    else
+      if [ -f '{{ apache_raw_target }}' ] && ! grep -Fq '{{ apache_management_marker }}' '{{ apache_raw_target }}'; then
+        printf 'unmanaged\n' >&2; exit 42;
+      fi
+      install -m 0644 "$tmp" '{{ apache_raw_target }}'; printf 'changed\n';
+    fi
+  register: apache_raw_file_write
+  changed_when: apache_raw_file_write.stdout | trim == 'changed'
+  failed_when: apache_raw_file_write.rc != 0
+
+- name: Track raw file changes
+  ansible.builtin.set_fact:
+    apache_managed_changed: >-
+      {{ apache_managed_changed | default(false) | bool or apache_raw_file_write.changed | bool }}

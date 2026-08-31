@@ -1,0 +1,61 @@
+---
+- name: Render raw compatibility HTTP content on controller
+  ansible.builtin.set_fact:
+    apache_raw_http_content: "{{ lookup('template', playbook_dir + '/templates/vhost-http.conf.j2') }}"
+    apache_raw_https_content: "{{ lookup('template', playbook_dir + '/templates/vhost-ssl.conf.j2') }}"
+
+- name: Inspect raw compatibility certificate pair
+  ansible.builtin.raw: >-
+    if [ -f '{{ apache_cert_root }}/{{ apache_domain }}/fullchain.pem' ] &&
+       [ -f '{{ apache_cert_root }}/{{ apache_domain }}/privkey.pem' ]; then
+      printf 'complete\n';
+    elif [ -f '{{ apache_cert_root }}/{{ apache_domain }}/fullchain.pem' ] ||
+         [ -f '{{ apache_cert_root }}/{{ apache_domain }}/privkey.pem' ]; then
+      printf 'partial\n';
+    else printf 'missing\n'; fi
+  register: apache_raw_certificate_state
+  changed_when: false
+
+- name: Apply raw compatibility HTTP file
+  ansible.builtin.include_tasks: raw_write_file.yml
+  vars:
+    apache_raw_target: "{{ apache_sites_available }}/{{ apache_domain }}.conf"
+    apache_raw_content: "{{ apache_raw_http_content }}"
+
+- name: Apply raw compatibility HTTPS file when certificates are complete
+  ansible.builtin.include_tasks: raw_write_file.yml
+  vars:
+    apache_raw_target: "{{ apache_sites_available }}/{{ apache_domain }}-le-ssl.conf"
+    apache_raw_content: "{{ apache_raw_https_content }}"
+  when: apache_raw_certificate_state.stdout | trim == 'complete'
+
+- name: Report raw compatibility HTTPS state
+  ansible.builtin.debug:
+    msg: >-
+      HTTPS skipped for {{ apache_domain }} (certificate state:
+      {{ apache_raw_certificate_state.stdout | trim }}).
+  when: apache_raw_certificate_state.stdout | trim != 'complete'
+
+- name: Enable raw compatibility HTTP site only when needed
+  ansible.builtin.raw: >-
+    if [ -e '{{ apache_sites_enabled }}/{{ apache_domain }}.conf' ]; then
+      printf 'unchanged\n';
+    else {{ a2ensite_path }} '{{ apache_domain }}.conf' >/dev/null && printf 'changed\n'; fi
+  register: apache_raw_http_enable
+  changed_when: apache_raw_http_enable.stdout | trim == 'changed'
+
+- name: Enable raw compatibility HTTPS site only when needed
+  ansible.builtin.raw: >-
+    if [ -e '{{ apache_sites_enabled }}/{{ apache_domain }}-le-ssl.conf' ]; then
+      printf 'unchanged\n';
+    else {{ a2ensite_path }} '{{ apache_domain }}-le-ssl.conf' >/dev/null && printf 'changed\n'; fi
+  register: apache_raw_https_enable
+  changed_when: apache_raw_https_enable.stdout | trim == 'changed'
+  when: apache_raw_certificate_state.stdout | trim == 'complete'
+
+- name: Track raw compatibility changes
+  ansible.builtin.set_fact:
+    apache_managed_changed: >-
+      {{ apache_managed_changed | default(false) | bool
+         or apache_raw_http_enable.changed | bool
+         or apache_raw_https_enable.changed | default(false) | bool }}
