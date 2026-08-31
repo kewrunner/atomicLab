@@ -40,6 +40,9 @@
         - "{{ playbook_dir }}/../apache_domain_vhosts/deploy.yml"
         - "{{ playbook_dir }}/../apache_domain_vhosts/preflight.yml"
         - "{{ playbook_dir }}/../apache_domain_vhosts/tasks/validate_sites.yml"
+        - "{{ playbook_dir }}/../apache_domain_vhosts/tasks/raw_write_file.yml"
+        - "{{ playbook_dir }}/../apache_domain_vhosts/tasks/raw_configure_site.yml"
+        - "{{ playbook_dir }}/../apache_domain_vhosts/tasks/raw_post_validate.yml"
       register: implementation_sources
 
     - name: Verify compatibility-safe ordering and validation boundaries
@@ -69,6 +72,23 @@
           - "ownership_cases.unmanaged_https is search('exits 42')"
           - "certificate_cases.complete is search('certificates:complete:')"
           - "certificate_cases.incomplete is search('certificates:incomplete:')"
+
+    - name: Verify explicit raw privilege escalation
+      ansible.builtin.assert:
+        that:
+          - "'ansible.builtin.raw: id -u' in (implementation_sources.results[1].content | b64decode)"
+          - "'become: true' in (implementation_sources.results[1].content | b64decode)"
+          - "'become_user: root' in (implementation_sources.results[1].content | b64decode)"
+          - "'become_method: sudo' in (implementation_sources.results[1].content | b64decode)"
+          - "'id -u' in (implementation_sources.results[1].content | b64decode)"
+          - "(implementation_sources.results[3].content | b64decode) is search('become: true')"
+          - "(implementation_sources.results[4].content | b64decode) is search('become: true')"
+          - "(implementation_sources.results[5].content | b64decode) is search('become: true')"
+          - "'sudo -S' not in (implementation_sources.results[1].content | b64decode)"
+          - "'sudo -S' not in (implementation_sources.results[3].content | b64decode)"
+          - "'sudo -S' not in (implementation_sources.results[4].content | b64decode)"
+          - "'sudo -S' not in (implementation_sources.results[5].content | b64decode)"
+          - "'password' not in (implementation_sources.results[1].content | b64decode | lower)"
 
     - name: Read HTTP template
       ansible.builtin.slurp:

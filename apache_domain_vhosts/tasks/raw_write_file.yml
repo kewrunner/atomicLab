@@ -15,6 +15,9 @@
       install -m 0644 "$tmp" '{{ apache_raw_target }}'; printf 'changed\n';
     fi
   register: apache_raw_file_write
+  become: true
+  become_user: root
+  become_method: sudo
   changed_when: apache_raw_file_write.stdout | trim == 'changed'
   failed_when: apache_raw_file_write.rc != 0
 
