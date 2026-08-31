@@ -2,6 +2,9 @@
 - name: Run raw compatibility Apache configtest
   ansible.builtin.raw: "{{ apachectl_path }} configtest"
   register: apache_raw_configtest
+  become: true
+  become_user: root
+  become_method: sudo
   changed_when: false
 
 - name: Fail raw compatibility validation without reload
