@@ -24,3 +24,12 @@ raw_os_release:
 raw_platform_markers:
   ubuntu_crlf: "platform:ubuntu\r\n"
   debian_crlf: "platform:debian\r\n"
+ownership_cases:
+  neither_exists: "no target files"
+  managed_http: "HTTP target contains ownership marker"
+  managed_https: "HTTPS target contains ownership marker"
+  unmanaged_http: "HTTP target lacks ownership marker and exits 42"
+  unmanaged_https: "HTTPS target lacks ownership marker and exits 42"
+certificate_cases:
+  complete: "certificates:complete:elastic.atomicharvest.com"
+  incomplete: "certificates:incomplete:elastic.atomicharvest.com"

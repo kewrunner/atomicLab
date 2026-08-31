@@ -68,13 +68,16 @@
 - name: Preflight requested target ownership and certificate state
   ansible.builtin.raw: >-
     set -eu;
-    for f in
-      '{{ apache_sites_available }}/{{ item }}.conf'
-      '{{ apache_sites_available }}/{{ item }}-le-ssl.conf'; do
-      if [ -e "$f" ] && ! grep -Fq '{{ apache_management_marker }}' "$f"; then
-        printf 'unmanaged:%s\n' "$f"; exit 42;
-      fi;
-    done;
+    http_file='{{ apache_sites_available }}/{{ item }}.conf';
+    https_file='{{ apache_sites_available }}/{{ item }}-le-ssl.conf';
+    if [ -e "$http_file" ] &&
+       ! grep -Fq '{{ apache_management_marker }}' "$http_file"; then
+      printf 'unmanaged:%s\n' "$http_file"; exit 42;
+    fi;
+    if [ -e "$https_file" ] &&
+       ! grep -Fq '{{ apache_management_marker }}' "$https_file"; then
+      printf 'unmanaged:%s\n' "$https_file"; exit 42;
+    fi;
     if [ -f '{{ apache_cert_root }}/{{ item }}/fullchain.pem' ] &&
        [ -f '{{ apache_cert_root }}/{{ item }}/privkey.pem' ]; then
       printf 'certificates:complete:%s\n' '{{ item }}';
