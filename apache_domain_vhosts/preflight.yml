@@ -9,6 +9,11 @@
 - name: Collect compatibility-safe Apache preflight state
   ansible.builtin.raw: >-
     printf '%s\n' '---OS---'; cat /etc/os-release 2>/dev/null || true;
+    if [ -r /etc/os-release ]; then
+      . /etc/os-release;
+      apache_platform_id=$(printf '%s' "${ID:-unknown}" | tr -d '\r');
+      printf 'platform:%s\n' "$apache_platform_id";
+    else printf 'platform:unknown\n'; fi;
     printf '%s\n' '---PATHS---';
     for p in /etc/apache2 /etc/apache2/sites-available /usr/sbin/apache2ctl /usr/sbin/a2ensite; do
       if [ -e "$p" ]; then printf 'exists:%s\n' "$p"; else printf 'missing:%s\n' "$p"; fi;
@@ -24,7 +29,7 @@
   ansible.builtin.set_fact:
     apache_platform_id: >-
       {{ (apache_raw_preflight.stdout
-          | regex_findall('(?m)^ID="?([A-Za-z0-9_-]+)"?$')
+          | regex_findall('(?m)^platform:([A-Za-z0-9_-]+)')
           | first | default('')) | lower }}
   when: apache_sites_to_add | length > 0
 
