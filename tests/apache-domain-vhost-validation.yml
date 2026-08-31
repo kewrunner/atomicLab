@@ -90,6 +90,26 @@
           - "'sudo -S' not in (implementation_sources.results[5].content | b64decode)"
           - "'password' not in (implementation_sources.results[1].content | b64decode | lower)"
 
+    - name: Read raw post-validation source
+      ansible.builtin.slurp:
+        src: "{{ playbook_dir }}/../apache_domain_vhosts/tasks/raw_post_validate.yml"
+      register: raw_post_validation_source
+
+    - name: Verify privileged configtest and reload gates
+      ansible.builtin.assert:
+        that:
+          - "'ansible.builtin.raw:' in (raw_post_validation_source.content | b64decode)"
+          - "'configtest' in (raw_post_validation_source.content | b64decode)"
+          - "'/usr/sbin/apache2ctl' in (implementation_sources.results[0].content | b64decode)"
+          - "'become: true' in (raw_post_validation_source.content | b64decode)"
+          - "'become_user: root' in (raw_post_validation_source.content | b64decode)"
+          - "'become_method: sudo' in (raw_post_validation_source.content | b64decode)"
+          - "'apache_raw_configtest.rc != 0' in (raw_post_validation_source.content | b64decode)"
+          - "'apache_raw_configtest.rc == 0' in (raw_post_validation_source.content | b64decode)"
+          - "'apache_managed_changed | default(false) | bool' in (raw_post_validation_source.content | b64decode)"
+          - "'sudo -S' not in (raw_post_validation_source.content | b64decode)"
+          - "'password' not in (raw_post_validation_source.content | b64decode | lower)"
+
     - name: Read HTTP template
       ansible.builtin.slurp:
         src: "{{ playbook_dir }}/../apache_domain_vhosts/templates/vhost-http.conf.j2"
