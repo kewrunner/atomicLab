@@ -2,83 +2,80 @@
 - name: Normalize survey input
   ansible.builtin.include_tasks: tasks/normalize_sites.yml
 
-- name: Validate supported platform and backend
+- name: Validate requested values before remote mutation
   ansible.builtin.include_tasks: tasks/validate_sites.yml
   when: apache_sites_to_add | length > 0
 
-- name: Verify Apache directories and tooling
-  ansible.builtin.stat:
-    path: "{{ item }}"
-  loop:
-    - "{{ apache_config_root }}"
-    - "{{ apache_sites_available }}"
-    - "{{ apachectl_path }}"
-    - "{{ a2ensite_path }}"
-  register: apache_preflight_paths
+- name: Collect compatibility-safe Apache preflight state
+  ansible.builtin.raw: >-
+    printf '%s\n' '---OS---'; cat /etc/os-release 2>/dev/null || true;
+    printf '%s\n' '---PATHS---';
+    for p in /etc/apache2 /etc/apache2/sites-available /usr/sbin/apache2ctl /usr/sbin/a2ensite; do
+      if [ -e "$p" ]; then printf 'exists:%s\n' "$p"; else printf 'missing:%s\n' "$p"; fi;
+    done;
+    printf '%s\n' '---SERVICE---';
+    if systemctl list-unit-files apache2.service 2>/dev/null | grep -q apache2.service; then printf 'service:exists\n'; else printf 'service:missing\n'; fi;
+    printf '%s\n' '---MODULES---'; /usr/sbin/apache2ctl -M 2>&1 || true
+  register: apache_raw_preflight
+  changed_when: false
   when: apache_sites_to_add | length > 0
 
-- name: Assert Debian Apache layout and tooling
+- name: Validate raw preflight platform and tooling
   ansible.builtin.assert:
     that:
-      - apache_preflight_paths.results | map(attribute='stat.exists') | min
+      - apache_raw_preflight.rc == 0
+      - apache_raw_preflight.stdout is search('ID=(ubuntu|debian)', ignorecase=True)
+      - "'exists:/etc/apache2' in apache_raw_preflight.stdout"
+      - "'exists:/etc/apache2/sites-available' in apache_raw_preflight.stdout"
+      - "'exists:/usr/sbin/apache2ctl' in apache_raw_preflight.stdout"
+      - "'exists:/usr/sbin/a2ensite' in apache_raw_preflight.stdout"
+      - "'service:exists' in apache_raw_preflight.stdout"
+      - apache_raw_preflight.stdout is search('proxy_module')
+      - apache_raw_preflight.stdout is search('proxy_http_module')
+      - apache_raw_preflight.stdout is search('proxy_wstunnel_module')
+      - apache_raw_preflight.stdout is search('rewrite_module')
     fail_msg: >-
-      Debian Apache preflight failed: expected /etc/apache2 layout and
-      apache2ctl/a2ensite tooling were not all found.
+      Raw Apache preflight failed. Supported Ubuntu/Debian layout, service,
+      tooling, or required modules were not detected.
   when: apache_sites_to_add | length > 0
 
-- name: Verify apache2 service is available
-  ansible.builtin.service_facts:
+- name: Select execution mode before mutation
+  ansible.builtin.set_fact:
+    apache_execution_mode: >-
+      {{ apache_forced_mode | default('') if apache_forced_mode | default('') in ['native', 'raw_compat']
+         else 'raw_compat' if (ansible_version.full is version('2.10', '<'))
+         else 'native' }}
   when: apache_sites_to_add | length > 0
 
-- name: Assert apache2 service exists
+- name: Report selected execution mode
+  ansible.builtin.debug:
+    msg: "Apache domain vhost execution mode: {{ apache_execution_mode }}"
+  when: apache_sites_to_add | length > 0
+
+- name: Preflight requested target ownership and certificate state
+  ansible.builtin.raw: >-
+    set -eu;
+    for f in
+      '{{ apache_sites_available }}/{{ item }}.conf'
+      '{{ apache_sites_available }}/{{ item }}-le-ssl.conf'; do
+      if [ -e "$f" ] && ! grep -Fq '{{ apache_management_marker }}' "$f"; then
+        printf 'unmanaged:%s\n' "$f"; exit 42;
+      fi;
+    done;
+    if [ -f '{{ apache_cert_root }}/{{ item }}/fullchain.pem' ] &&
+       [ -f '{{ apache_cert_root }}/{{ item }}/privkey.pem' ]; then
+      printf 'certificates:complete:%s\n' '{{ item }}';
+    else printf 'certificates:incomplete:%s\n' '{{ item }}'; fi
+  loop: "{{ apache_sites_to_add }}"
+  loop_control:
+    label: "{{ item }}"
+  register: apache_raw_target_preflight
+  changed_when: false
+  when: apache_sites_to_add | length > 0
+
+- name: Reject any raw preflight ownership collision
   ansible.builtin.assert:
-    that: apache_service_name in ansible_facts.services
-    fail_msg: "Required service {{ apache_service_name }} was not found."
-  when: apache_sites_to_add | length > 0
-
-- name: Verify required Apache modules are enabled
-  ansible.builtin.stat:
-    path: "{{ apache_config_root }}/mods-enabled/{{ item }}.load"
-  loop: "{{ apache_required_modules }}"
-  register: apache_module_checks
-  when: apache_sites_to_add | length > 0
-
-- name: Assert required Apache modules are enabled
-  ansible.builtin.assert:
-    that: item.stat.exists
-    fail_msg: >-
-      Required Apache module {{ item.item }} is unavailable or not enabled;
-      no Apache files have been changed.
-  loop: "{{ apache_module_checks.results }}"
-  when: apache_sites_to_add | length > 0
-
-- name: Check ownership of deterministic target files
-  ansible.builtin.stat:
-    path: "{{ apache_sites_available }}/{{ item }}"
-  loop: >-
-    {{ apache_sites_to_add | map('regex_replace', '$', '.conf') | list
-       + apache_sites_to_add | map('regex_replace', '$', '-le-ssl.conf') | list }}
-  register: apache_target_checks
-  when: apache_sites_to_add | length > 0
-
-- name: Read existing target files for ownership checks
-  ansible.builtin.slurp:
-    src: "{{ item.stat.path }}"
-  loop: "{{ apache_target_checks.results }}"
-  register: apache_existing_targets
-  when:
-    - apache_sites_to_add | length > 0
-    - item.stat.exists
-
-- name: Reject unmanaged target files
-  ansible.builtin.assert:
-    that: >-
-      (not item.stat.exists) or
-      (apache_management_marker in
-       ((apache_existing_targets.results | selectattr('item', 'equalto', item.item)
-         | map(attribute='content') | first | default('') | b64decode)))
-    fail_msg: >-
-      Refusing to overwrite unmanaged Apache target
-      {{ apache_sites_available }}/{{ item.item }}.
-  loop: "{{ apache_target_checks.results }}"
+    that: item.rc == 0
+    fail_msg: "Raw preflight rejected an unmanaged target or unsafe certificate state: {{ item.stdout }}"
+  loop: "{{ apache_raw_target_preflight.results }}"
   when: apache_sites_to_add | length > 0

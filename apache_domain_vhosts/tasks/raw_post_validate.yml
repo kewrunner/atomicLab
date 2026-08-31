@@ -1,0 +1,20 @@
+---
+- name: Run raw compatibility Apache configtest
+  ansible.builtin.raw: "{{ apachectl_path }} configtest"
+  register: apache_raw_configtest
+  changed_when: false
+
+- name: Fail raw compatibility validation without reload
+  ansible.builtin.fail:
+    msg: >-
+      apache2ctl configtest failed; Apache was not reloaded.
+      {{ apache_raw_configtest.stderr | default(apache_raw_configtest.stdout) }}
+  when: apache_raw_configtest.rc != 0
+
+- name: Reload Apache after successful raw validation
+  ansible.builtin.raw: "systemctl reload {{ apache_service_name }}"
+  register: apache_raw_reload
+  changed_when: true
+  when:
+    - apache_raw_configtest.rc == 0
+    - apache_managed_changed | default(false) | bool

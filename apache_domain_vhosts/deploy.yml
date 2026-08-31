@@ -2,7 +2,7 @@
 - name: Manage Apache domain virtual hosts
   hosts: all
   become: true
-  gather_facts: true
+  gather_facts: false
 
   vars:
     apache_sites_to_add: []
@@ -20,21 +20,40 @@
       - proxy_wstunnel
       - rewrite
     apache_management_marker: "# Managed by Ansible: apache-domain-vhost-management"
+    apache_execution_mode: "{{ apache_forced_mode | default('') }}"
 
   tasks:
     - name: Run Apache domain vhost preflight
       ansible.builtin.include_tasks: preflight.yml
 
-    - name: Configure requested Apache sites
+    - name: Configure requested Apache sites with native modules
       ansible.builtin.include_tasks: tasks/configure_site.yml
       loop: "{{ apache_sites_to_add }}"
       loop_control:
         loop_var: apache_domain
         label: "{{ apache_domain }}"
-      when: apache_sites_to_add | length > 0
+      when:
+        - apache_sites_to_add | length > 0
+        - apache_execution_mode == 'native'
 
-    - name: Validate and reload Apache when managed state changed
+    - name: Configure requested Apache sites with raw compatibility
+      ansible.builtin.include_tasks: tasks/raw_configure_site.yml
+      loop: "{{ apache_sites_to_add }}"
+      loop_control:
+        loop_var: apache_domain
+        label: "{{ apache_domain }}"
+      when:
+        - apache_sites_to_add | length > 0
+        - apache_execution_mode == 'raw_compat'
+
+    - name: Validate and reload Apache with native modules
       ansible.builtin.include_tasks: post_validate.yml
       when:
         - apache_sites_to_add | length > 0
-        - apache_managed_changed | default(false) | bool
+        - apache_execution_mode == 'native'
+
+    - name: Validate and reload Apache with raw compatibility
+      ansible.builtin.include_tasks: tasks/raw_post_validate.yml
+      when:
+        - apache_sites_to_add | length > 0
+        - apache_execution_mode == 'raw_compat'
