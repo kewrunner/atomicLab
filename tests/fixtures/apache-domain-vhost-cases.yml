@@ -21,3 +21,6 @@ raw_os_release:
   ubuntu: "ID=ubuntu\nVERSION_ID=24.04\n"
   debian: "ID=debian\nVERSION_ID=12\n"
   unsupported: "ID=fedora\nVERSION_ID=40\n"
+raw_platform_markers:
+  ubuntu_crlf: "platform:ubuntu\r\n"
+  debian_crlf: "platform:debian\r\n"
