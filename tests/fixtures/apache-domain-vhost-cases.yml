@@ -17,3 +17,7 @@ expected_normalized_domains:
 expected_websocket_backends:
   http: ws://127.0.0.1:5601
   https: wss://backend.example.com:8443
+raw_os_release:
+  ubuntu: "ID=ubuntu\nVERSION_ID=24.04\n"
+  debian: "ID=debian\nVERSION_ID=12\n"
+  unsupported: "ID=fedora\nVERSION_ID=40\n"

@@ -1,11 +1,4 @@
 ---
-- name: Validate supported distribution
-  ansible.builtin.assert:
-    that: ansible_facts.distribution in ['Ubuntu', 'Debian']
-    fail_msg: >-
-      Unsupported platform {{ ansible_facts.distribution | default('unknown') }};
-      only Ubuntu and Debian Apache layouts are supported.
-
 - name: Validate every requested FQDN
   ansible.builtin.assert:
     that:
