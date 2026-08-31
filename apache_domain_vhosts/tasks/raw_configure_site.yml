@@ -42,6 +42,9 @@
       printf 'unchanged\n';
     else {{ a2ensite_path }} '{{ apache_domain }}.conf' >/dev/null && printf 'changed\n'; fi
   register: apache_raw_http_enable
+  become: true
+  become_user: root
+  become_method: sudo
   changed_when: apache_raw_http_enable.stdout | trim == 'changed'
 
 - name: Enable raw compatibility HTTPS site only when needed
@@ -50,6 +53,9 @@
       printf 'unchanged\n';
     else {{ a2ensite_path }} '{{ apache_domain }}-le-ssl.conf' >/dev/null && printf 'changed\n'; fi
   register: apache_raw_https_enable
+  become: true
+  become_user: root
+  become_method: sudo
   changed_when: apache_raw_https_enable.stdout | trim == 'changed'
   when: apache_raw_certificate_state.stdout | trim == 'complete'
 

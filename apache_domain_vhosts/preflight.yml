@@ -65,6 +65,23 @@
     msg: "Apache domain vhost execution mode: {{ apache_execution_mode }}"
   when: apache_sites_to_add | length > 0
 
+- name: Verify raw compatibility effective privilege before mutation
+  ansible.builtin.raw: id -u
+  become: true
+  become_user: root
+  become_method: sudo
+  register: apache_raw_privilege_probe
+  changed_when: false
+  when: apache_sites_to_add | length > 0
+
+- name: Require effective root for Apache mutation
+  ansible.builtin.assert:
+    that: apache_raw_privilege_probe.stdout | trim == '0'
+    fail_msg: >-
+      Apache mutation requires effective UID 0; raw privilege probe returned
+      {{ apache_raw_privilege_probe.stdout | trim | default('empty output') }}.
+  when: apache_sites_to_add | length > 0
+
 - name: Preflight requested target ownership and certificate state
   ansible.builtin.raw: >-
     set -eu;

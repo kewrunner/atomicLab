@@ -14,6 +14,9 @@
 - name: Reload Apache after successful raw validation
   ansible.builtin.raw: "systemctl reload {{ apache_service_name }}"
   register: apache_raw_reload
+  become: true
+  become_user: root
+  become_method: sudo
   changed_when: true
   when:
     - apache_raw_configtest.rc == 0
