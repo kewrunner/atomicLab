@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "internalElasticsearch": {
+      "type": "stdio",
+      "command": "/opt/mcp-servers/elasticsearch/.venv/bin/python",
+      "args": [
+        "/opt/mcp-servers/elasticsearch/elasticsearch_mcp_server.py"
+      ]
+    }
+  }
+}
