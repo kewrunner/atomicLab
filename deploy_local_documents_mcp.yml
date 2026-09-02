@@ -12,15 +12,12 @@
     mcp_service_user: "{{ ansible_user }}"
 
   pre_tasks:
-    - name: Validate required variables
+    - name: Validate exposed directory variable
       ansible.builtin.assert:
         that:
-          - mcp_target_host | default('') | length > 0
-          - inventory_hostname == mcp_target_host
           - mcp_exposed_directory | default('') | length > 0
           - mcp_exposed_directory is match('^/')
-        fail_msg: >-
-          Set mcp_target_host and an absolute mcp_exposed_directory.
+        fail_msg: Set an absolute mcp_exposed_directory.
 
     - name: Inspect exposed directory
       ansible.builtin.stat:
