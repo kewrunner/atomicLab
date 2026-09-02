@@ -16,12 +16,19 @@
           - ansible_play_hosts | length == 1
         fail_msg: Select exactly one target using the AWX Limit field.
 
-    - name: Validate exposed directory variable
+    - name: Validate exposed directories variable
       ansible.builtin.assert:
         that:
-          - mcp_exposed_directory | default('') | length > 0
-          - mcp_exposed_directory is match('^/')
-        fail_msg: Set an absolute mcp_exposed_directory.
+          - mcp_exposed_directories | default('') | trim | length > 0
+        fail_msg: Set mcp_exposed_directories to one or more comma-separated absolute paths.
+
+    - name: Normalize exposed directories
+      ansible.builtin.set_fact:
+        mcp_directory_list: >-
+          {{ mcp_exposed_directories.split(',')
+             | map('trim')
+             | reject('equalto', '')
+             | list }}
 
     - name: Collect service state
       ansible.builtin.service_facts:
@@ -40,10 +47,21 @@
         port: "{{ mcp_port }}"
         timeout: 10
 
-    - name: Verify exposed directory
+    - name: Verify exposed directories
       ansible.builtin.stat:
-        path: "{{ mcp_exposed_directory }}"
-      register: mcp_directory
+        path: "{{ item }}"
+      loop: "{{ mcp_directory_list }}"
+      register: mcp_directory_results
+
+    - name: Confirm exposed directories
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.isdir
+        fail_msg: "{{ item.item }} is unavailable."
+      loop: "{{ mcp_directory_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
 
     - name: Verify VS Code MCP configuration
       ansible.builtin.stat:
@@ -53,10 +71,8 @@
     - name: Confirm validation result
       ansible.builtin.assert:
         that:
-          - mcp_directory.stat.exists
-          - mcp_directory.stat.isdir
           - mcp_vscode_config.stat.exists
           - mcp_vscode_config.stat.isreg
         success_msg: >-
           Local Documents MCP is running on port {{ mcp_port }}
-          and exposes {{ mcp_exposed_directory }}.
+          and exposes {{ mcp_directory_list | join(', ') }}.
