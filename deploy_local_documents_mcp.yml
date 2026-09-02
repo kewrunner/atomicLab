@@ -10,6 +10,7 @@
     mcp_config_dir: /etc/local-documents-mcp
     mcp_port: 8010
     mcp_service_user: "{{ ansible_user }}"
+    mcp_workspace_dir: "/home/{{ mcp_service_user }}/mcp-documents-workspace"
 
   pre_tasks:
     - name: Require one AWX target
@@ -186,6 +187,21 @@
               }
             }
           }
+
+    - name: Create VS Code MCP workspace
+      ansible.builtin.file:
+        path: "{{ mcp_workspace_dir }}/.vscode"
+        state: directory
+        owner: "{{ mcp_service_user }}"
+        mode: "0755"
+
+    - name: Configure VS Code MCP workspace
+      ansible.builtin.copy:
+        src: "{{ mcp_config_dir }}/vscode-mcp.json"
+        dest: "{{ mcp_workspace_dir }}/.vscode/mcp.json"
+        remote_src: true
+        owner: "{{ mcp_service_user }}"
+        mode: "0644"
 
     - name: Enable and start MCP service
       ansible.builtin.systemd:
