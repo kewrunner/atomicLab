@@ -2,7 +2,6 @@
 - name: Validate Local Documents MCP deployment
   hosts: all
   gather_facts: true
-  become: true
 
   vars:
     local_documents_mcp_service_name: local-documents-mcp
