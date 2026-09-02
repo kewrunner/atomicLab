@@ -1,0 +1,323 @@
+---
+- name: Validate Local Documents MCP deployment
+  hosts: all
+  gather_facts: true
+
+  vars:
+    local_documents_mcp_service_name: local-documents-mcp
+    local_documents_mcp_bind_address: "127.0.0.1"
+    local_documents_mcp_port: 8010
+    local_documents_mcp_endpoint: /mcp
+
+    local_documents_mcp_install_dir: /opt/local-documents-mcp
+    local_documents_mcp_config_dir: /etc/local-documents-mcp
+
+    local_documents_mcp_expected_tools:
+      - list_directory
+      - read_file
+      - search_files
+      - get_file_metadata
+
+  pre_tasks:
+    - name: Require target-host variable
+      ansible.builtin.assert:
+        that:
+          - mcp_target_host is defined
+          - mcp_target_host | string | length > 0
+        fail_msg: >-
+          mcp_target_host must identify the single approved validation host.
+
+    - name: Restrict validation to approved target
+      ansible.builtin.assert:
+        that:
+          - inventory_hostname == mcp_target_host
+        fail_msg: >-
+          Refusing validation because inventory host
+          {{ inventory_hostname }} does not equal approved target
+          {{ mcp_target_host }}.
+
+    - name: Require exposed-directory variable
+      ansible.builtin.assert:
+        that:
+          - mcp_exposed_directory is defined
+          - mcp_exposed_directory | string | length > 1
+          - mcp_exposed_directory is match('^/')
+        fail_msg: >-
+          mcp_exposed_directory must be a non-root absolute path.
+
+  tasks:
+    - name: Gather systemd service facts
+      ansible.builtin.service_facts:
+
+    - name: Confirm MCP service unit exists
+      ansible.builtin.assert:
+        that:
+          - >-
+            local_documents_mcp_service_name + '.service'
+            in ansible_facts.services
+        fail_msg: >-
+          {{ local_documents_mcp_service_name }}.service is not installed.
+          Run the deployment Job Template before validation.
+
+    - name: Confirm MCP service is running
+      ansible.builtin.assert:
+        that:
+          - >-
+            ansible_facts.services[
+              local_documents_mcp_service_name + '.service'
+            ].state == 'running'
+          - >-
+            ansible_facts.services[
+              local_documents_mcp_service_name + '.service'
+            ].status == 'enabled'
+        fail_msg: >-
+          MCP service is not both enabled and running.
+
+    - name: Inspect required deployment paths
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ local_documents_mcp_install_dir }}"
+        - "{{ local_documents_mcp_install_dir }}/.venv/bin/python"
+        - "{{ local_documents_mcp_config_dir }}"
+        - "{{ mcp_exposed_directory }}"
+      register: local_documents_mcp_paths
+
+    - name: Confirm required deployment paths exist
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+        fail_msg: "Required deployment path is missing: {{ item.item }}"
+      loop: "{{ local_documents_mcp_paths.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Read systemd unit properties
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - show
+          - "{{ local_documents_mcp_service_name }}.service"
+          - --property=ActiveState
+          - --property=SubState
+          - --property=UnitFileState
+          - --property=User
+          - --property=Group
+          - --property=NoNewPrivileges
+      register: local_documents_mcp_systemd_properties
+      changed_when: false
+
+    - name: Validate systemd unit properties
+      ansible.builtin.assert:
+        that:
+          - "'ActiveState=active' in local_documents_mcp_systemd_properties.stdout"
+          - "'SubState=running' in local_documents_mcp_systemd_properties.stdout"
+          - "'UnitFileState=enabled' in local_documents_mcp_systemd_properties.stdout"
+          - "'NoNewPrivileges=yes' in local_documents_mcp_systemd_properties.stdout"
+        fail_msg: >-
+          The MCP systemd unit does not satisfy runtime requirements.
+
+    - name: Verify systemd unit syntax
+      ansible.builtin.command:
+        argv:
+          - systemd-analyze
+          - verify
+          - "{{ local_documents_mcp_service_name }}.service"
+      register: local_documents_mcp_unit_verify
+      changed_when: false
+      failed_when: local_documents_mcp_unit_verify.rc != 0
+
+    - name: Collect TCP listeners
+      ansible.builtin.command:
+        argv:
+          - ss
+          - -lnt
+      register: local_documents_mcp_listeners
+      changed_when: false
+
+    - name: Confirm MCP listens on loopback
+      ansible.builtin.assert:
+        that:
+          - >-
+            (local_documents_mcp_bind_address ~ ':' ~
+             local_documents_mcp_port|string)
+            in local_documents_mcp_listeners.stdout
+        fail_msg: >-
+          MCP service is not listening on
+          {{ local_documents_mcp_bind_address }}:
+          {{ local_documents_mcp_port }}.
+
+    - name: Confirm MCP is not exposed on wildcard IPv4
+      ansible.builtin.assert:
+        that:
+          - >-
+            ('0.0.0.0:' ~ local_documents_mcp_port|string)
+            not in local_documents_mcp_listeners.stdout
+          - >-
+            ('*:' ~ local_documents_mcp_port|string)
+            not in local_documents_mcp_listeners.stdout
+        fail_msg: >-
+          MCP port {{ local_documents_mcp_port }} is exposed beyond loopback.
+
+    - name: Initialize MCP protocol session
+      ansible.builtin.uri:
+        url: >-
+          http://{{ local_documents_mcp_bind_address }}:
+          {{ local_documents_mcp_port }}{{ local_documents_mcp_endpoint }}
+        method: POST
+        headers:
+          Accept: "application/json, text/event-stream"
+          Content-Type: application/json
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          id: 1
+          method: initialize
+          params:
+            protocolVersion: "2025-06-18"
+            capabilities: {}
+            clientInfo:
+              name: awx-validation
+              version: "1.0"
+        return_content: true
+        status_code:
+          - 200
+          - 202
+      register: local_documents_mcp_initialize
+      changed_when: false
+
+    - name: Confirm MCP initialization response
+      ansible.builtin.assert:
+        that:
+          - local_documents_mcp_initialize.status in [200, 202]
+          - >-
+            'local-documents' in
+            local_documents_mcp_initialize.content | lower
+            or
+            'serverInfo' in local_documents_mcp_initialize.content
+        fail_msg: >-
+          HTTP responded, but a valid MCP initialization response was not
+          detected.
+
+    - name: Set MCP session header
+      ansible.builtin.set_fact:
+        local_documents_mcp_session_headers: >-
+          {{
+            {
+              'Accept': 'application/json, text/event-stream',
+              'Content-Type': 'application/json'
+            }
+            | combine(
+                (
+                  local_documents_mcp_initialize.mcp_session_id
+                  is defined
+                )
+                | ternary(
+                    {
+                      'Mcp-Session-Id':
+                      local_documents_mcp_initialize.mcp_session_id
+                    },
+                    {}
+                  )
+              )
+          }}
+
+    - name: Request MCP tool inventory
+      ansible.builtin.uri:
+        url: >-
+          http://{{ local_documents_mcp_bind_address }}:
+          {{ local_documents_mcp_port }}{{ local_documents_mcp_endpoint }}
+        method: POST
+        headers: "{{ local_documents_mcp_session_headers }}"
+        body_format: json
+        body:
+          jsonrpc: "2.0"
+          id: 2
+          method: tools/list
+          params: {}
+        return_content: true
+        status_code:
+          - 200
+          - 202
+      register: local_documents_mcp_tools
+      changed_when: false
+
+    - name: Confirm all expected MCP tools were discovered
+      ansible.builtin.assert:
+        that:
+          - item in local_documents_mcp_tools.content
+        fail_msg: "Expected MCP tool was not discovered: {{ item }}"
+      loop: "{{ local_documents_mcp_expected_tools }}"
+
+    - name: Inspect generated VS Code configuration
+      ansible.builtin.stat:
+        path: >-
+          {{ local_documents_mcp_vscode_workspace }}/.vscode/mcp.json
+      register: local_documents_mcp_vscode_config
+      when:
+        - local_documents_mcp_vscode_configure | default(true) | bool
+
+    - name: Confirm VS Code MCP configuration exists
+      ansible.builtin.assert:
+        that:
+          - local_documents_mcp_vscode_config.stat.exists
+          - local_documents_mcp_vscode_config.stat.isreg
+        fail_msg: >-
+          VS Code MCP configuration was not created in the configured
+          workspace.
+      when:
+        - local_documents_mcp_vscode_configure | default(true) | bool
+
+    - name: Load VS Code MCP configuration
+      ansible.builtin.slurp:
+        src: >-
+          {{ local_documents_mcp_vscode_workspace }}/.vscode/mcp.json
+      register: local_documents_mcp_vscode_raw
+      when:
+        - local_documents_mcp_vscode_configure | default(true) | bool
+
+    - name: Decode VS Code MCP configuration
+      ansible.builtin.set_fact:
+        local_documents_mcp_vscode_json: >-
+          {{
+            local_documents_mcp_vscode_raw.content
+            | b64decode
+            | from_json
+          }}
+      when:
+        - local_documents_mcp_vscode_configure | default(true) | bool
+
+    - name: Validate VS Code MCP server definition
+      ansible.builtin.assert:
+        that:
+          - "'servers' in local_documents_mcp_vscode_json"
+          - >-
+            'localDocuments'
+            in local_documents_mcp_vscode_json.servers
+          - >-
+            local_documents_mcp_vscode_json
+            .servers.localDocuments.type == 'http'
+          - >-
+            local_documents_mcp_vscode_json
+            .servers.localDocuments.url ==
+            'http://' ~ local_documents_mcp_bind_address ~ ':' ~
+            local_documents_mcp_port|string ~
+            local_documents_mcp_endpoint
+        fail_msg: >-
+          VS Code MCP configuration does not reference the deployed
+          loopback HTTP endpoint.
+      when:
+        - local_documents_mcp_vscode_configure | default(true) | bool
+
+    - name: Publish AWX validation summary
+      ansible.builtin.debug:
+        msg:
+          validation: PASS
+          target: "{{ inventory_hostname }}"
+          service: "{{ local_documents_mcp_service_name }}"
+          endpoint: >-
+            http://{{ local_documents_mcp_bind_address }}:
+            {{ local_documents_mcp_port }}{{ local_documents_mcp_endpoint }}
+          exposed_directory: "{{ mcp_exposed_directory }}"
+          tools: "{{ local_documents_mcp_expected_tools }}"
+          network_exposure: loopback-only
