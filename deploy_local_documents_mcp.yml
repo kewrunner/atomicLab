@@ -19,24 +19,42 @@
           - ansible_play_hosts | length == 1
         fail_msg: Select exactly one target using the AWX Limit field.
 
-    - name: Validate exposed directory variable
+    - name: Validate exposed directories variable
       ansible.builtin.assert:
         that:
-          - mcp_exposed_directory | default('') | length > 0
-          - mcp_exposed_directory is match('^/')
-        fail_msg: Set an absolute mcp_exposed_directory.
+          - mcp_exposed_directories | default('') | trim | length > 0
+        fail_msg: Set mcp_exposed_directories to one or more comma-separated absolute paths.
 
-    - name: Inspect exposed directory
+    - name: Normalize exposed directories
+      ansible.builtin.set_fact:
+        mcp_directory_list: >-
+          {{ mcp_exposed_directories.split(',')
+             | map('trim')
+             | reject('equalto', '')
+             | list }}
+
+    - name: Validate exposed directory paths
+      ansible.builtin.assert:
+        that:
+          - item is match('^/')
+        fail_msg: "{{ item }} must be an absolute path."
+      loop: "{{ mcp_directory_list }}"
+
+    - name: Inspect exposed directories
       ansible.builtin.stat:
-        path: "{{ mcp_exposed_directory }}"
-      register: mcp_directory
+        path: "{{ item }}"
+      loop: "{{ mcp_directory_list }}"
+      register: mcp_directory_results
 
-    - name: Require existing exposed directory
+    - name: Require existing exposed directories
       ansible.builtin.assert:
         that:
-          - mcp_directory.stat.exists
-          - mcp_directory.stat.isdir
-        fail_msg: "{{ mcp_exposed_directory }} must already exist."
+          - item.stat.exists
+          - item.stat.isdir
+        fail_msg: "{{ item.item }} must already exist and be a directory."
+      loop: "{{ mcp_directory_results.results }}"
+      loop_control:
+        label: "{{ item.item }}"
 
   tasks:
     - name: Create MCP directories
@@ -75,7 +93,11 @@
           from pathlib import Path
           from mcp.server.fastmcp import FastMCP
 
-          ROOT = Path(os.environ["MCP_EXPOSED_DIRECTORY"]).resolve()
+          ROOTS = tuple(
+              Path(item).resolve(strict=True)
+              for item in os.environ["MCP_EXPOSED_DIRECTORIES"].split(",")
+              if item
+          )
           MAX_SIZE = 5 * 1024 * 1024
 
           mcp = FastMCP(
@@ -84,22 +106,41 @@
               port=8010,
           )
 
-          def safe_path(relative_path: str) -> Path:
-              target = (ROOT / relative_path).resolve(strict=True)
+          def safe_path(requested_path: str) -> Path:
+              requested = Path(requested_path)
 
-              try:
-                  target.relative_to(ROOT)
-              except ValueError as error:
+              if requested.is_absolute():
+                  target = requested.resolve(strict=True)
+              elif len(ROOTS) == 1:
+                  target = (ROOTS[0] / requested).resolve(strict=True)
+              else:
                   raise ValueError(
-                      "Requested path is outside the exposed directory"
-                  ) from error
+                      "Use an absolute path when multiple directories are exposed"
+                  )
 
-              return target
+              for root in ROOTS:
+                  try:
+                      target.relative_to(root)
+                      return target
+                  except ValueError:
+                      continue
+
+              raise ValueError("Requested path is outside the exposed directories")
 
           @mcp.tool()
-          def list_directory(path: str = ".") -> list[dict]:
-              """List files and directories beneath the exposed directory."""
-              directory = safe_path(path)
+          def list_directory(path: str = "") -> list[dict]:
+              """List approved roots or the contents of an approved directory."""
+              if not path and len(ROOTS) > 1:
+                  return [
+                      {
+                          "name": root.name or str(root),
+                          "path": str(root),
+                          "is_directory": True,
+                      }
+                      for root in ROOTS
+                  ]
+
+              directory = ROOTS[0] if not path else safe_path(path)
 
               if not directory.is_dir():
                   raise ValueError("Requested path is not a directory")
@@ -107,6 +148,7 @@
               return [
                   {
                       "name": item.name,
+                      "path": str(item),
                       "is_directory": item.is_dir(),
                   }
                   for item in sorted(
@@ -143,7 +185,7 @@
         group: root
         mode: "0644"
         content: |
-          MCP_EXPOSED_DIRECTORY={{ mcp_exposed_directory }}
+          MCP_EXPOSED_DIRECTORIES={{ mcp_directory_list | join(',') }}
       notify: Restart MCP service
 
     - name: Install systemd service
