@@ -1,7 +1,6 @@
 ---
 - name: Deploy local documents MCP
   hosts: all
-  become: true
   gather_facts: true
 
   vars:
