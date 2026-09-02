@@ -17,7 +17,6 @@
 - name: Deploy AWX WAZO LAB SSH public key
   hosts: all
   gather_facts: false
-  become: true
 
   vars:
     awx_ssh_user: freddygonzalez
