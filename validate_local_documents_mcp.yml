@@ -8,6 +8,12 @@
     mcp_port: 8010
 
   tasks:
+    - name: Require one AWX target
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts | length == 1
+        fail_msg: Select exactly one target using the AWX Limit field.
+
     - name: Validate exposed directory variable
       ansible.builtin.assert:
         that:
