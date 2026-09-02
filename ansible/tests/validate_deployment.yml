@@ -4,7 +4,7 @@
   gather_facts: true
   become: false
   roles:
-    - role: local_documents_mcp
+    - role: ../roles/local_documents_mcp
   vars:
     mcp_target_host: localhost
     mcp_exposed_directory: /tmp
