@@ -1,0 +1,13 @@
+---
+- name: Configure VS Code MCP client when requested
+  ansible.builtin.template:
+    src: mcp.json.j2
+    dest: "{{ local_documents_mcp_vscode_workspace }}/.vscode/mcp.json"
+    mode: '0644'
+  when:
+    - local_documents_mcp_vscode_configure | bool
+    - local_documents_mcp_vscode_workspace | length > 0
+- name: Explicitly reject unsafe remote-network opt-in
+  ansible.builtin.assert:
+    that: local_documents_mcp_allow_remote_network | bool or local_documents_mcp_bind_address in ['127.0.0.1','::1','localhost']
+    fail_msg: "Remote binding requires local_documents_mcp_allow_remote_network=true."

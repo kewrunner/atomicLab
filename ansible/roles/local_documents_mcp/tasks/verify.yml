@@ -1,0 +1,12 @@
+---
+- name: Verify service is active
+  ansible.builtin.command: "systemctl is-active {{ local_documents_mcp_service_name }}.service"
+  register: local_documents_mcp_active
+  changed_when: false
+  failed_when: local_documents_mcp_active.stdout.strip() != 'active'
+- name: Verify local endpoint responds
+  ansible.builtin.uri:
+    url: "http://{{ local_documents_mcp_bind_address }}:{{ local_documents_mcp_port }}{{ local_documents_mcp_endpoint }}"
+    method: GET
+    status_code: [200, 400, 405, 406]
+  when: local_documents_mcp_bind_address in ['127.0.0.1','localhost','::1']

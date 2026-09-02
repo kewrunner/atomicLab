@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  author: Atomic Harvest
+  description: Read-only Local Documents MCP over Streamable HTTP
+  license: MIT
+  platforms:
+    - name: Ubuntu
+      versions: [noble]
+    - name: EL
+      versions: ['9']
+dependencies: []

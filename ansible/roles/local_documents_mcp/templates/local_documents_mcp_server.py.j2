@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Read-only MCP filesystem server; all paths are constrained to one root."""
+import fnmatch, logging, os
+from pathlib import Path
+from mcp.server.fastmcp import FastMCP
+
+ROOT = Path(os.environ['MCP_EXPOSED_DIRECTORY']).resolve(strict=True)
+MAX_BYTES = int(os.environ.get('MCP_MAX_FILE_SIZE_MB', '5')) * 1024 * 1024
+MAX_ITEMS = int(os.environ.get('MCP_MAX_DIRECTORY_ITEMS', '500'))
+MAX_FILES = int(os.environ.get('MCP_MAX_SEARCH_FILES', '100'))
+MAX_RESULTS = int(os.environ.get('MCP_MAX_SEARCH_RESULTS', '50'))
+HIDDEN = os.environ.get('MCP_HIDDEN_FILES_ENABLED', 'false').lower() == 'true'
+ALLOWED = {x.lower() for x in os.environ.get('MCP_ALLOWED_EXTENSIONS', '').split(',') if x}
+BLOCKED_EXT = {x.lower() for x in os.environ.get('MCP_BLOCKED_EXTENSIONS', '').split(',') if x}
+BLOCKED_NAMES = set(os.environ.get('MCP_BLOCKED_FILENAMES', '').split(','))
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger('local-documents-mcp')
+mcp = FastMCP('local-documents')
+
+def safe(relative: str, want_dir=False) -> Path:
+    p = (ROOT / relative).resolve(strict=True)
+    try: p.relative_to(ROOT)
+    except ValueError: raise ValueError('path is outside exposed directory')
+    if p.name in BLOCKED_NAMES or (not HIDDEN and any(part.startswith('.') for part in p.relative_to(ROOT).parts)):
+        raise ValueError('path is not permitted')
+    ext = p.suffix.lower()
+    if ext in BLOCKED_EXT or (ALLOWED and ext not in ALLOWED): raise ValueError('file extension is not permitted')
+    if want_dir and not p.is_dir(): raise ValueError('not a directory')
+    return p
+
+def audit(name, status, rel=''):
+    log.info('tool=%s status=%s path=%s', name, status, rel if rel else '-')
+
+@mcp.tool()
+def list_directory(path: str = '') -> list[dict]:
+    try:
+        p = safe(path, True); out=[]
+        for child in sorted(p.iterdir(), key=lambda x: x.name)[:MAX_ITEMS]:
+            if child.name in BLOCKED_NAMES or (not HIDDEN and child.name.startswith('.')): continue
+            out.append({'name': child.name, 'is_directory': child.is_dir()})
+        audit('list_directory','ok',path); return out
+    except Exception: audit('list_directory','denied',path); raise
+
+@mcp.tool()
+def read_text_file(path: str) -> str:
+    try:
+        p=safe(path)
+        if not p.is_file() or p.stat().st_size > MAX_BYTES: raise ValueError('file unavailable or too large')
+        result=p.read_text(encoding='utf-8', errors='replace'); audit('read_text_file','ok',path); return result
+    except Exception: audit('read_text_file','denied',path); raise
+
+@mcp.tool()
+def file_metadata(path: str) -> dict:
+    p=safe(path); s=p.stat(); audit('file_metadata','ok',path)
+    return {'path': path, 'name': p.name, 'is_directory': p.is_dir(), 'size': s.st_size, 'mode': oct(s.st_mode & 0o777)}
+
+@mcp.tool()
+def search_filenames(pattern: str, path: str = '') -> list[str]:
+    base=safe(path, True); results=[]
+    for p in base.rglob('*'):
+        rel=p.relative_to(ROOT)
+        if len(results) >= MAX_RESULTS or len(list(results)) >= MAX_FILES: break
+        if (HIDDEN or not any(x.startswith('.') for x in rel.parts)) and p.name not in BLOCKED_NAMES and fnmatch.fnmatch(p.name, pattern): results.append(str(rel))
+    audit('search_filenames','ok',path); return results
+
+@mcp.tool()
+def search_file_contents(query: str, path: str = '') -> list[str]:
+    base=safe(path, True); results=[]; scanned=0
+    for p in base.rglob('*'):
+        if scanned >= MAX_FILES or len(results) >= MAX_RESULTS: break
+        if not p.is_file() or p.name in BLOCKED_NAMES or (not HIDDEN and any(x.startswith('.') for x in p.relative_to(ROOT).parts)): continue
+        scanned += 1
+        if p.stat().st_size <= MAX_BYTES and query in p.read_text(encoding='utf-8', errors='replace'): results.append(str(p.relative_to(ROOT)))
+    audit('search_file_contents','ok',path); return results
+
+if __name__ == '__main__':
+    mcp.run(transport='streamable-http')

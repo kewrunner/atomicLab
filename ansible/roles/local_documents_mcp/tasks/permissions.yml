@@ -1,0 +1,9 @@
+---
+- name: Grant service account read/traverse ACL on exposed directory
+  ansible.posix.acl:
+    path: "{{ mcp_canonical_directory.stdout }}"
+    entity: "{{ local_documents_mcp_user }}"
+    etype: user
+    permissions: rx
+    state: present
+    recursive: false

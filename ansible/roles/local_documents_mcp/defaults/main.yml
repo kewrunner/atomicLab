@@ -1,0 +1,28 @@
+---
+mcp_exposed_directory: ""
+mcp_target_host: ""
+local_documents_mcp_service_name: local-documents-mcp
+local_documents_mcp_user: local-documents-mcp
+local_documents_mcp_group: local-documents-mcp
+local_documents_mcp_install_dir: /opt/local-documents-mcp
+local_documents_mcp_config_dir: /etc/local-documents-mcp
+local_documents_mcp_bind_address: 127.0.0.1
+local_documents_mcp_port: 8010
+local_documents_mcp_endpoint: /mcp
+local_documents_mcp_max_file_size_mb: 5
+local_documents_mcp_max_directory_items: 500
+local_documents_mcp_max_search_files: 100
+local_documents_mcp_max_search_results: 50
+local_documents_mcp_hidden_files_enabled: false
+local_documents_mcp_allowed_extensions: []
+local_documents_mcp_blocked_extensions: [.exe, .sh, .bat, .cmd, .ps1, .dll, .pem, .key, .p12, .pfx]
+local_documents_mcp_blocked_filenames: [.env, id_rsa, id_ed25519, authorized_keys, known_hosts]
+local_documents_mcp_vscode_configure: true
+local_documents_mcp_vscode_user: ""
+local_documents_mcp_vscode_workspace: ""
+local_documents_mcp_manage_firewall: false
+local_documents_mcp_allow_remote_network: false
+local_documents_mcp_requirements:
+  - "mcp>=1.9,<2.0"
+  - "starlette>=0.46,<0.48"
+  - "uvicorn>=0.34,<0.36"

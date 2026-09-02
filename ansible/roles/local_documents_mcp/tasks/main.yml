@@ -1,0 +1,9 @@
+---
+- ansible.builtin.import_tasks: validate.yml
+- ansible.builtin.import_tasks: dependencies.yml
+- ansible.builtin.import_tasks: account.yml
+- ansible.builtin.import_tasks: application.yml
+- ansible.builtin.import_tasks: permissions.yml
+- ansible.builtin.import_tasks: service.yml
+- ansible.builtin.import_tasks: vscode.yml
+- ansible.builtin.import_tasks: verify.yml

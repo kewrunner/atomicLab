@@ -1,0 +1,6 @@
+---
+- name: Restart local documents MCP
+  ansible.builtin.systemd:
+    name: "{{ local_documents_mcp_service_name }}.service"
+    state: restarted
+    daemon_reload: true

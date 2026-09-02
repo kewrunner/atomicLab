@@ -1,0 +1,13 @@
+---
+- name: Create service group
+  ansible.builtin.group:
+    name: "{{ local_documents_mcp_group }}"
+    system: true
+- name: Create service account
+  ansible.builtin.user:
+    name: "{{ local_documents_mcp_user }}"
+    group: "{{ local_documents_mcp_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: "{{ local_documents_mcp_install_dir }}"
+    create_home: false
