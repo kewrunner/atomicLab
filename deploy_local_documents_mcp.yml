@@ -43,6 +43,11 @@
           - ca-certificates
         state: present
         update_cache: true
+        lock_timeout: 300
+      register: mcp_apt_install
+      retries: 3
+      delay: 15
+      until: mcp_apt_install is succeeded
 
     - name: Create MCP directories
       ansible.builtin.file:
