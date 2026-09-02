@@ -6,6 +6,8 @@
   vars:
     mcp_service_name: local-documents-mcp
     mcp_port: 8010
+    mcp_service_user: "{{ ansible_user }}"
+    mcp_workspace_dir: "/home/{{ mcp_service_user }}/mcp-documents-workspace"
 
   tasks:
     - name: Require one AWX target
@@ -43,11 +45,18 @@
         path: "{{ mcp_exposed_directory }}"
       register: mcp_directory
 
+    - name: Verify VS Code MCP configuration
+      ansible.builtin.stat:
+        path: "{{ mcp_workspace_dir }}/.vscode/mcp.json"
+      register: mcp_vscode_config
+
     - name: Confirm validation result
       ansible.builtin.assert:
         that:
           - mcp_directory.stat.exists
           - mcp_directory.stat.isdir
+          - mcp_vscode_config.stat.exists
+          - mcp_vscode_config.stat.isreg
         success_msg: >-
           Local Documents MCP is running on port {{ mcp_port }}
           and exposes {{ mcp_exposed_directory }}.
