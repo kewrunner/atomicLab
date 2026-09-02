@@ -1,7 +1,0 @@
----
-- name: Deploy Local Documents MCP
-  hosts: all
-  become: true
-  gather_facts: true
-  roles:
-    - role: ../roles/local_documents_mcp

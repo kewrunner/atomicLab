@@ -1,0 +1,210 @@
+---
+- name: Deploy local documents MCP
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    mcp_service_name: local-documents-mcp
+    mcp_install_dir: /opt/local-documents-mcp
+    mcp_config_dir: /etc/local-documents-mcp
+    mcp_port: 8010
+    mcp_service_user: "{{ ansible_user }}"
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - mcp_target_host | default('') | length > 0
+          - inventory_hostname == mcp_target_host
+          - mcp_exposed_directory | default('') | length > 0
+          - mcp_exposed_directory is match('^/')
+        fail_msg: >-
+          Set mcp_target_host and an absolute mcp_exposed_directory.
+
+    - name: Inspect exposed directory
+      ansible.builtin.stat:
+        path: "{{ mcp_exposed_directory }}"
+      register: mcp_directory
+
+    - name: Require existing exposed directory
+      ansible.builtin.assert:
+        that:
+          - mcp_directory.stat.exists
+          - mcp_directory.stat.isdir
+        fail_msg: "{{ mcp_exposed_directory }} must already exist."
+
+  tasks:
+    - name: Install dependencies
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+          - ca-certificates
+        state: present
+        update_cache: true
+
+    - name: Create MCP directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "{{ mcp_install_dir }}"
+        - "{{ mcp_config_dir }}"
+
+    - name: Create Python virtual environment
+      ansible.builtin.command:
+        cmd: "python3 -m venv {{ mcp_install_dir }}/.venv"
+        creates: "{{ mcp_install_dir }}/.venv/bin/python"
+
+    - name: Install MCP Python package
+      ansible.builtin.pip:
+        name: "mcp>=1.9,<2.0"
+        virtualenv: "{{ mcp_install_dir }}/.venv"
+      notify: Restart MCP service
+
+    - name: Install MCP server
+      ansible.builtin.copy:
+        dest: "{{ mcp_install_dir }}/server.py"
+        owner: root
+        group: root
+        mode: "0755"
+        content: |
+          #!/usr/bin/env python3
+          """Minimal read-only MCP filesystem server."""
+
+          import os
+          from pathlib import Path
+          from mcp.server.fastmcp import FastMCP
+
+          ROOT = Path(os.environ["MCP_EXPOSED_DIRECTORY"]).resolve()
+          MAX_SIZE = 5 * 1024 * 1024
+
+          mcp = FastMCP(
+              "local-documents",
+              host="127.0.0.1",
+              port=8010,
+          )
+
+          def safe_path(relative_path: str) -> Path:
+              target = (ROOT / relative_path).resolve(strict=True)
+
+              try:
+                  target.relative_to(ROOT)
+              except ValueError as error:
+                  raise ValueError(
+                      "Requested path is outside the exposed directory"
+                  ) from error
+
+              return target
+
+          @mcp.tool()
+          def list_directory(path: str = ".") -> list[dict]:
+              """List files and directories beneath the exposed directory."""
+              directory = safe_path(path)
+
+              if not directory.is_dir():
+                  raise ValueError("Requested path is not a directory")
+
+              return [
+                  {
+                      "name": item.name,
+                      "is_directory": item.is_dir(),
+                  }
+                  for item in sorted(
+                      directory.iterdir(),
+                      key=lambda entry: entry.name,
+                  )
+                  if not item.name.startswith(".")
+              ]
+
+          @mcp.tool()
+          def read_text_file(path: str) -> str:
+              """Read one text file beneath the exposed directory."""
+              document = safe_path(path)
+
+              if not document.is_file():
+                  raise ValueError("Requested path is not a file")
+
+              if document.stat().st_size > MAX_SIZE:
+                  raise ValueError("File exceeds the 5 MiB limit")
+
+              return document.read_text(
+                  encoding="utf-8",
+                  errors="replace",
+              )
+
+          if __name__ == "__main__":
+              mcp.run(transport="streamable-http")
+      notify: Restart MCP service
+
+    - name: Install MCP environment file
+      ansible.builtin.copy:
+        dest: "{{ mcp_config_dir }}/local-documents-mcp.env"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          MCP_EXPOSED_DIRECTORY={{ mcp_exposed_directory }}
+      notify: Restart MCP service
+
+    - name: Install systemd service
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ mcp_service_name }}.service"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Local Documents MCP Server
+          After=network.target
+
+          [Service]
+          Type=simple
+          User={{ mcp_service_user }}
+          WorkingDirectory={{ mcp_install_dir }}
+          EnvironmentFile={{ mcp_config_dir }}/local-documents-mcp.env
+          ExecStart={{ mcp_install_dir }}/.venv/bin/python {{ mcp_install_dir }}/server.py
+          Restart=on-failure
+          RestartSec=5
+          NoNewPrivileges=true
+          PrivateTmp=true
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart MCP service
+
+    - name: Install VS Code MCP configuration example
+      ansible.builtin.copy:
+        dest: "{{ mcp_config_dir }}/vscode-mcp.json"
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          {
+            "servers": {
+              "localDocuments": {
+                "type": "http",
+                "url": "http://127.0.0.1:8010/mcp"
+              }
+            }
+          }
+
+    - name: Enable and start MCP service
+      ansible.builtin.systemd:
+        name: "{{ mcp_service_name }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+  handlers:
+    - name: Restart MCP service
+      ansible.builtin.systemd:
+        name: "{{ mcp_service_name }}"
+        enabled: true
+        state: restarted
+        daemon_reload: true
