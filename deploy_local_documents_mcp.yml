@@ -34,6 +34,32 @@
         fail_msg: "{{ mcp_exposed_directory }} must already exist."
 
   tasks:
+    - name: Wait for APT and DPKG locks
+      ansible.builtin.shell: |
+        timeout=300
+        interval=5
+       }
+        elapsed=0
+
+        while fuser \
+          /var/lib/dpkg/lock-frontend \
+          /var/lib/dpkg/lock \
+          /var/lib/apt/lists/lock \
+          /var/cache/apt/archives/lock \
+          >/dev/null 2>&1
+        do
+          if [ "${elapsed}" -ge "${timeout}" ]; then
+            echo "Timed out waiting for APT/DPKG locks" >&2
+            exit 1
+          fi
+
+          sleep "${interval}"
+          elapsed=$((elapsed + interval))
+        done
+      args:
+        executable: /bin/bash
+      changed_when: false
+
     - name: Install dependencies
       ansible.builtin.apt:
         name:
@@ -43,7 +69,6 @@
           - ca-certificates
         state: present
         update_cache: true
-        lock_timeout: 300
       register: mcp_apt_install
       retries: 3
       delay: 15
