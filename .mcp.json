@@ -1,0 +1,23 @@
+{
+	"mcpServers": {
+		"atomicserver2Elasticsearch": {
+			"type": "stdio",
+			"command": "ssh",
+			"args": [
+				"-T",
+				"-o",
+				"BatchMode=yes",
+				"-o",
+				"StrictHostKeyChecking=yes",
+				"-o",
+				"UserKnownHostsFile=/Users/atomicharvest/atomicLab/.vscode/atomicserver2_known_hosts",
+				"oc_remote@64.182.20.92",
+				"/opt/mcp-servers/elasticsearch/.venv/bin/python",
+				"/opt/mcp-servers/elasticsearch/elasticsearch_mcp_server.py"
+			],
+			"tools": [
+				"*"
+			]
+		}
+	}
+}
