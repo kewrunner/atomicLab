@@ -1,5 +1,27 @@
 # Internal Elasticsearch MCP Server
 
+## atomicserver2 deployment (October 27, 2026)
+
+- SSH target: `oc_remote@64.182.20.92` (`atomicserver2`).
+- Elasticsearch: `9.4.4`, at `https://127.0.0.1:9220` with CA verification.
+- Runtime: `/opt/mcp-servers/elasticsearch`, configuration and restricted API
+  key: `/etc/mcp-elasticsearch`.
+- API key expires January 25, 2027 at 8:24 PM America/New_York. Rotate it before
+  expiration. Its scope is cluster monitoring and reading `logs-*`/`metrics-*`.
+- The local workspace `.vscode/mcp.json` starts the remote server through SSH
+  as `atomicserver2Elasticsearch`. It uses existing workstation SSH key access
+  and the host key recorded in `.vscode/atomicserver2_known_hosts`.
+- In this local workspace, run **MCP: List Servers**, select
+  `atomicserver2Elasticsearch`, and start it. Reload the window if needed.
+- The deployment used the included installer with its endpoint changed from
+  port `9200` to `9220`. Preserve that change when reinstalling on this host.
+- `oc_remote_login` is excluded from Git. The MCP configuration contains no
+  passwords or Elasticsearch API keys.
+- Verification: MCP initialization and discovery of all four tools passed
+  over workstation SSH. Data-stream listing returned 25 streams; bounded log
+  and metric reads passed. Cluster health was yellow with 157 active primary
+  shards, zero unassigned primary shards, and 73 unassigned replica shards.
+
 Read-only Model Context Protocol (MCP) access to an Elasticsearch cluster from
 VS Code over Remote SSH. The installer deploys a dedicated Python MCP server on
 the Elasticsearch host and uses `stdio`, so it does not create an MCP network
