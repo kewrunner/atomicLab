@@ -13,6 +13,13 @@
   and the host key recorded in `.vscode/atomicserver2_known_hosts`.
 - In this local workspace, run **MCP: List Servers**, select
   `atomicserver2Elasticsearch`, and start it. Reload the window if needed.
+- Codex uses the separate project configuration `.codex/config.toml`, which
+  registers the same four tools through SSH. `codex mcp get
+  atomicserver2Elasticsearch --json` confirms that Codex loads the definition.
+  Reload the Codex IDE extension/window after adding this configuration, then
+  ask Codex to call `atomicserver2Elasticsearch.elasticsearch_health`. Tool
+  availability must be verified in the reloaded session; a CLI protocol test
+  alone does not confirm that tools are attached to an existing chat.
 - The deployment used the included installer with its endpoint changed from
   port `9200` to `9220`. Preserve that change when reinstalling on this host.
 - `oc_remote_login` is excluded from Git. The MCP configuration contains no

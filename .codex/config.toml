@@ -1,0 +1,16 @@
+[mcp_servers.atomicserver2Elasticsearch]
+command = "/usr/bin/ssh"
+args = [
+  "-T",
+  "-o", "BatchMode=yes",
+  "-o", "ConnectTimeout=10",
+  "-o", "StrictHostKeyChecking=yes",
+  "-o", "UserKnownHostsFile=/Users/atomicharvest/atomicLab/.vscode/atomicserver2_known_hosts",
+  "oc_remote@64.182.20.92",
+  "/opt/mcp-servers/elasticsearch/.venv/bin/python",
+  "/opt/mcp-servers/elasticsearch/elasticsearch_mcp_server.py",
+]
+startup_timeout_sec = 30
+tool_timeout_sec = 90
+enabled = true
+enabled_tools = ["elasticsearch_health", "list_data_streams", "search_logs", "recent_metrics"]
