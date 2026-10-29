@@ -14,3 +14,6 @@ startup_timeout_sec = 30
 tool_timeout_sec = 90
 enabled = true
 enabled_tools = ["elasticsearch_health", "list_data_streams", "search_logs", "recent_metrics"]
+
+[mcp_servers.atomicserver2Elasticsearch.tools.search_logs]
+approval_mode = "approve"
